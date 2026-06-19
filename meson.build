@@ -1,0 +1,192 @@
+project(
+    'syringe',
+    'c',
+    version: '0.4.0',
+    default_options: [
+        'warning_level=3',
+        'c_std=gnu11',
+    ],
+    meson_version: '>= 1.0.0',
+)
+
+# ── compiler & linker setup ───────────────────────────────────────────────
+
+add_project_arguments('-fPIC', language: 'c')
+
+project_c_flags = [
+    '-Wall',
+    '-Wextra',
+    '-O2',
+]
+
+# ── Dependencies ──────────────────────────────────────────────────────────
+
+cc = meson.get_compiler('c')
+pthread_lib = cc.find_library('pthread', required: true)
+dl_lib = cc.find_library('dl', required: true)
+
+inc = include_directories('include')
+
+# ── Architecture selection ────────────────────────────────────────────────
+# Exactly one arch backend is compiled in, chosen from the host CPU family.
+# Add a new arch: drop src/arch/arch_<name>.c (implementing src/arch/arch.h),
+# then add it to the map below.
+host_arch = host_machine.cpu_family()
+
+arch_srcs = {
+    'x86_64': 'src/arch/arch_x86_64.c',
+    'aarch64': 'src/arch/arch_aarch64.c',
+    'arm': 'src/arch/arch_arm.c',
+    'riscv64': 'src/arch/arch_riscv64.c',
+}
+
+if not arch_srcs.has_key(host_arch)
+    error(
+        'Unsupported architecture: '
+        + host_arch
+        + '. Supported: '
+        + ', '.join(arch_srcs.keys()),
+    )
+endif
+
+arch_src = arch_srcs[host_arch]
+message('  target arch:      ' + host_arch + ' → ' + arch_src)
+
+# ══════════════════════════════════════════════════════════════════════════
+#  TARGETS
+# ══════════════════════════════════════════════════════════════════════════
+
+# ── libsyringe.so — cross-process injection surface ───────────────────────
+#
+#   SYRINGE Yields Runtime Injected Native Global Executables
+#
+# Public API (syringe.h):
+#   - syringe_inject(pid, so_path)   — ptrace + dlopen inject
+#
+# Internal (NOT in header, file-scope prototype in syringe.c):
+#   - syringe_build_shellcode(...)   — escape hatch for advanced users
+#
+# The GOT/PLT hooker (syringe_hook.h) is HEADER-ONLY — no separate .so
+# to link. Consumers just #include "syringe_hook.h" from one .c file.
+syringe_lib = library(
+    'syringe',
+    ['src/syringe.c', arch_src],
+    c_args: project_c_flags,
+    include_directories: inc,
+    link_args: ['-ldl', '-lpthread'],
+    version: '0.4',
+    install: true,
+)
+
+# Install both public headers under subdir 'syringe/'
+install_headers(
+    ['include/syringe.h', 'include/syringe_hook.h'],
+    subdir: 'syringe',
+)
+
+# ── syringe-cli (CLI binary — links only libsyringe)
+syringe_cli_exe = executable(
+    'syringe-cli',
+    'src/syringe-cli.c',
+    c_args: project_c_flags,
+    include_directories: inc,
+    link_args: ['-ldl', '-lpthread'],
+    link_with: syringe_lib,
+    install: true,
+)
+
+# ── libgleshook.so (internal — inject-ready sample, hooks EGL/GLX/SDL/Wayland)
+# syringe_hook.h is header-only, so libgleshook.c just #includes it.
+gleshook_lib = library(
+    'gleshook',
+    sources: ['tests/lib/libgleshook.c'],
+    c_args: project_c_flags,
+    include_directories: inc,
+    link_args: ['-ldl', '-lpthread'],
+    install: false,
+)
+
+# ── libtest.so (internal — minimal test library for injection verification) ──
+# Meson auto-prepends 'lib' to library names, and reserves 'test' as a target
+# name. Using name_prefix: '' with full filename 'libtest' produces libtest.so.
+test_sample_lib = library(
+    'libtest',
+    'tests/lib/libtest.c',
+    c_args: project_c_flags,
+    include_directories: inc,
+    link_args: ['-ldl', '-lpthread'],
+    name_prefix: '',
+    install: false,
+)
+
+# ══════════════════════════════════════════════════════════════════════════
+#  TESTS: unit tests
+# ══════════════════════════════════════════════════════════════════════════
+
+# ── test_hook (header-only — just #include syringe_hook.h) ───────────────
+test_hook_exe = executable(
+    'test_hook',
+    ['tests/src/test_hook.c'],
+    c_args: project_c_flags,
+    include_directories: inc,
+    link_args: ['-ldl', '-lpthread'],
+    dependencies: [pthread_lib, dl_lib],
+)
+
+test('hook', test_hook_exe, timeout: 30)
+
+# ── test_syringe (links against libsyringe.so) ───────────────────────────
+test_syringe_exe = executable(
+    'test_syringe',
+    'tests/src/test_syringe.c',
+    c_args: project_c_flags,
+    include_directories: inc,
+    link_args: ['-ldl', '-lpthread'],
+    link_with: syringe_lib,
+)
+
+test('syringe', test_syringe_exe, timeout: 30)
+
+# ══════════════════════════════════════════════════════════════════════════
+#  PKG-CONFIG + SUBPROJECT SUPPORT
+# ══════════════════════════════════════════════════════════════════════════
+
+# pkg-config file for libsyringe (injection only)
+pkg = import('pkgconfig')
+pkg.generate(
+    syringe_lib,
+    name: 'libsyringe',
+    description: 'ptrace-based shared-library injector for x86-64 (hooker is header-only)',
+    version: meson.project_version(),
+    filebase: 'libsyringe',
+    extra_cflags: '-I${includedir}/syringe',
+)
+
+# declare_dependency — for subproject usage
+libsyringe_dep = declare_dependency(
+    link_with: [syringe_lib],
+    link_args: ['-ldl', '-lpthread'],
+    include_directories: inc,
+)
+
+# Suppress unused variable warnings — these are intentionally kept for
+# Meson's internal build target tracking
+_ = [syringe_cli_exe, gleshook_lib, test_sample_lib, libsyringe_dep]
+
+# ══════════════════════════════════════════════════════════════════════════
+#  Summary
+# ══════════════════════════════════════════════════════════════════════════
+
+message('\n=== syringe build configuration ===')
+message('  libsyringe:       ptrace inject (syringe_inject)')
+message('  syringe_hook.h:   header-only GOT/PLT hooker (no .so)')
+message('  syringe-cli:      CLI (links libsyringe only)')
+message(
+    '  libgleshook:      inject-ready sample (EGL/GLX/SDL/Wayland hooks, header-only hooker)',
+)
+message('  libtest:          minimal test .so for injection verification')
+message('  tests:            hook, syringe')
+message(
+    '  install:          syringe.h + syringe_hook.h + libsyringe.so + pkg-config',
+)
+message('=============================================\n')

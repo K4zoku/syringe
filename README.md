@@ -5,9 +5,9 @@
 A two-part toolkit for x86-64 Linux:
 
 - **`libsyringe.so`** — ptrace-based shared-library injector (cross-process). Build with meson, link with `-lsyringe`.
-- **`syringe_hook.h`** — header-only GOT/PLT + inline trampoline hooker (in-process). Just `#include` it; nothing to link.
+- **`syringe/hook/syringe_hook.h`** — header-only GOT/PLT + inline trampoline hooker (in-process). Just `#include` it; nothing to link.
 
-The two halves are independent. Typical workflow: use `libsyringe` to inject a `.so` into a target process; that `.so` then `#include "syringe_hook.h"` and calls `syringe_hook_install()` in its constructor to patch the target's GOT.
+The two halves are independent. Typical workflow: use `libsyringe` to inject a `.so` into a target process; that `.so` then `#include <syringe/hook/syringe_hook.h>` and calls `syringe_hook_install()` in its constructor to patch the target's GOT.
 
 ## Build
 
@@ -24,7 +24,7 @@ meson test -C build -v
 
 Two test suites:
 - `test_syringe` — links `libsyringe.so`, tests `syringe_inject` + internal `syringe_build_shellcode`
-- `test_hook` — header-only, `#include "syringe_hook.h"`, tests `syringe_hook_*`
+- `test_hook` — header-only, `#include <syringe/hook/syringe_hook.h>`, tests `syringe_hook_*`
 
 ## Install (system-wide)
 
@@ -39,7 +39,7 @@ Installs:
 |------|---------|
 | `/usr/local/lib/x86_64-linux-gnu/libsyringe.so.0.4` | Cross-process injector |
 | `/usr/local/include/syringe/syringe.h` | Header for `libsyringe` — only `syringe_inject` |
-| `/usr/local/include/syringe/syringe_hook.h` | Header-only hooker — `#include` from 1 `.c` file, nothing to link |
+| `/usr/local/include/syringe/hook/syringe_hook.h` | Header-only hooker — `#include` from 1 `.c` file, nothing to link |
 | `/usr/local/bin/syringe-cli` | CLI tool |
 | `/usr/local/lib/x86_64-linux-gnu/pkgconfig/libsyringe.pc` | pkg-config for injection |
 
@@ -78,7 +78,7 @@ gcc -D_GNU_SOURCE injector.c -o injector $(pkg-config --cflags --libs libsyringe
 ```c
 /* libhook.c — the ONLY .c file in libhook.so */
 #define _GNU_SOURCE
-#include "syringe_hook.h"
+#include <syringe/hook/syringe_hook.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -114,10 +114,10 @@ Build — **just include the header, no link to libsyringe_hook**:
 # Option A: system install (recommended)
 sudo ninja -C build install    # one-time
 gcc -shared -fPIC -O2 -o libhook.so libhook.c \
-    -I/usr/local/include/syringe -ldl -lpthread
+    -I/usr/local/include -ldl -lpthread
 
 # Option B: vendored (copy header into your project tree)
-cp /path/to/syringe/include/syringe_hook.h my_project/vendor/
+cp /path/to/syringe/include/hook/syringe_hook.h my_project/vendor/
 gcc -shared -fPIC -O2 -o libhook.so libhook.c \
     -Imy_project/vendor -ldl -lpthread
 
@@ -134,13 +134,13 @@ Then inject:
 syringe-cli <pid> ./libhook.so
 ```
 
-> ⚠️ **Single-TU rule:** Because `syringe_hook.h` uses `static` registry, you MUST include it from **exactly one** `.c` file per `.so` / executable. The standard pattern above (1 `.c` file with constructor) is correct. Do not include `syringe_hook.h` from multiple `.c` files in the same `.so` — each will get its own private registry and hooks won't be visible across files.
+> ⚠️ **Single-TU rule:** Because `syringe/hook/syringe_hook.h` uses `static` registry, you MUST include it from **exactly one** `.c` file per `.so` / executable. The standard pattern above (1 `.c` file with constructor) is correct. Do not include `syringe/hook/syringe_hook.h` from multiple `.c` files in the same `.so` — each will get its own private registry and hooks won't be visible across files.
 
 ### Pattern 4: App hooking itself (also header-only)
 
 ```c
 #define _GNU_SOURCE
-#include "syringe_hook.h"
+#include <syringe/hook/syringe_hook.h>
 #include <stdio.h>
 #include <fcntl.h>
 
@@ -160,7 +160,7 @@ int main(void) {
 ```
 
 ```bash
-gcc -D_GNU_SOURCE app.c -o app -I/usr/local/include/syringe -ldl -lpthread
+gcc -D_GNU_SOURCE app.c -o app -I/usr/local/include -ldl -lpthread
 ```
 
 (No `-lsyringe` needed — only the header.)
@@ -174,7 +174,7 @@ syringe_dep = dependency('libsyringe', required: true)
 executable('my_injector', 'main.c', dependencies: [syringe_dep])
 ```
 
-For `syringe_hook.h`, just add the include path manually:
+For `syringe/hook/syringe_hook.h`, just add the include path manually:
 
 ```meson
 executable('my_hook_so', 'hook.c',
@@ -212,7 +212,7 @@ executable('my_hook_so', 'hook.c',
 
 > `syringe_build_shellcode` exists as an internal helper in `libsyringe.so` but is **NOT declared in `syringe.h`**. Most callers should use `syringe_inject()`. If you genuinely need to drive ptrace yourself, you can `extern`-declare it (see `tests/src/test_syringe.c`).
 
-### `syringe_hook.h` — hooking surface (header-only)
+### `syringe/hook/syringe_hook.h` — hooking surface (header-only)
 
 | Function | Description | Conditional |
 |----------|-------------|-------------|
@@ -284,9 +284,9 @@ These changes bring syringe's inline hook to feature parity with
 advantages: header-only, multi-layer write fallback, auto-registry, and
 multi-arch ptrace injector.
 
-## Configuration macros for `syringe_hook.h`
+## Configuration macros for `syringe/hook/syringe_hook.h`
 
-Define these macros BEFORE `#include "syringe_hook.h"` to customize the hooker's behavior and footprint. They affect ONLY the translation unit that includes the header.
+Define these macros BEFORE `#include <syringe/hook/syringe_hook.h>` to customize the hooker's behavior and footprint. They affect ONLY the translation unit that includes the header.
 
 ### `SYRINGE_HOOK_MAX` — registry capacity
 
@@ -294,7 +294,7 @@ Default: `32`. Override if you need more (or fewer) hooks installed simultaneous
 
 ```c
 #define SYRINGE_HOOK_MAX 64   /* support up to 64 hooks */
-#include "syringe_hook.h"
+#include <syringe/hook/syringe_hook.h>
 ```
 
 ### `SYRINGE_HOOK_NO_HELPERS` — strip remove/query functions (debloat)
@@ -303,7 +303,7 @@ Removes `syringe_hook_remove`, `syringe_hook_remove_all`, `syringe_hook_count`, 
 
 ```c
 #define SYRINGE_HOOK_NO_HELPERS
-#include "syringe_hook.h"
+#include <syringe/hook/syringe_hook.h>
 
 __attribute__((constructor))
 static void on_load(void) {
@@ -328,7 +328,7 @@ Replaces all `SYRINGE_HOOK_LOG()` calls with no-ops. Use in production where std
 
 ```c
 #define SYRINGE_HOOK_NO_LOG
-#include "syringe_hook.h"
+#include <syringe/hook/syringe_hook.h>
 ```
 
 ### Combined example
@@ -339,7 +339,7 @@ Replaces all `SYRINGE_HOOK_LOG()` calls with no-ops. Use in production where std
 #define SYRINGE_HOOK_MAX 16
 #define SYRINGE_HOOK_NO_HELPERS
 #define SYRINGE_HOOK_NO_LOG
-#include "syringe_hook.h"
+#include <syringe/hook/syringe_hook.h>
 
 static int (*orig_open)(const char *, int, ...);
 static int my_open(const char *p, int f, ...) { return orig_open(p, f, 0); }
@@ -352,7 +352,7 @@ static void on_load(void) {
 ```
 
 ```bash
-gcc -shared -fPIC -O2 -o libhook.so libhook.c -I/usr/local/include/syringe -ldl -lpthread
+gcc -shared -fPIC -O2 -o libhook.so libhook.c -I/usr/local/include -ldl -lpthread
 ```
 
 ## CLI
@@ -362,6 +362,51 @@ syringe-cli <pid> <library.so>
 
 # example
 syringe-cli 10024 ./libhook.so
+```
+
+## Platform support
+
+| Platform | Injector (`libsyringe.so`) | Hooker (`syringe/hook/syringe_hook.h`) | Notes |
+|----------|----------------------------|---------------------------|-------|
+| **Linux x86_64** | ✅ Full | ✅ Full | Primary target. 76 unit tests + 19 e2e tests. |
+| **Linux aarch64** | ✅ Full (v0.6) | ✅ Full (v0.6) | PAC strip via `xpac`, BTI `bti c` prologue detection. Cross-compile via `cross/aarch64-linux-gnu.ini`. |
+| **Linux arm32** | ⚠️ Stub only | ❌ No inline (GOT-only) | Injector returns 0 from `build_shellcode`. Hooker falls back to GOT/PLT patching. |
+| **Linux riscv64** | ⚠️ Stub only | ❌ No inline (GOT-only) | Same as arm32. |
+| **Windows** | ❌ | ❌ | Out of scope (use Detours or MinHook). |
+| **macOS** | ❌ | ❌ | Out of scope (Mach-O injection is very different). |
+
+### aarch64 (ARM64) specifics
+
+The aarch64 backend handles these ARM security features:
+
+- **PAC (Pointer Authentication)**: function pointers may have PAC signature
+  in the upper bits. We strip them via `xpac x16` before patching. On
+  non-PAC hardware (older ARMv8.0), `xpac` is a no-op.
+- **BTI (Branch Target Identification)**: if the prologue starts with
+  `bti c` or `bti j`, the trampoline bounce stub includes the same BTI
+  instruction so it remains a valid branch target.
+- **MTE (Memory Tagging)**: the bounce stub is `mmap`'d with
+  `MAP_ANONYMOUS`, which yields untagged memory. The bounce only
+  executes code, never dereferences tagged pointers, so MTE is safe.
+
+The aarch64 inline hook uses a 16-byte `LDR x16,[pc,#8] + BR x16 + .quad addr`
+encoding (instead of x86-64's 14-byte `FF 25` abs JMP). This is fixed-size
+regardless of hook-target distance — `B rel26` (4-byte branch) would only
+work within ±128 MB and we can't guarantee that.
+
+### Cross-compiling for aarch64
+
+```bash
+# Prerequisites (Ubuntu/Debian):
+sudo apt install gcc-aarch64-linux-gnu qemu-user qemu-user-static
+
+# Build:
+meson setup build-aarch64 --cross-file cross/aarch64-linux-gnu.ini
+ninja -C build-aarch64
+
+# Run tests under QEMU user-mode:
+qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-aarch64/test_hook
+qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-aarch64/test_inline
 ```
 
 ## Architecture
@@ -392,9 +437,9 @@ syringe-cli 10024 ./libhook.so
 
 1. **Simpler consumer experience** — 1 file to copy/include, no link flags, no pkg-config needed
 2. **Self-contained injectable `.so`** — `libhook.so` has 0 runtime dependencies beyond libc/libdl/libpthread
-3. **Per-`.so` registry isolation** — each `.so` that includes `syringe_hook.h` gets its own private `static` registry, so hooks from different `.so`'s don't conflict
+3. **Per-`.so` registry isolation** — each `.so` that includes `syringe/hook/syringe_hook.h` gets its own private `static` registry, so hooks from different `.so`'s don't conflict
 4. **No ABI risk** — every `.so` compiles the hooker source with its own compiler/version, no chance of struct layout mismatch
 
 ### Trade-off: single-TU per `.so`
 
-Because the registry is `static` (per-translation-unit), `syringe_hook.h` must be included from **exactly one** `.c` file per `.so` / executable. The standard pattern (1 `.c` file with constructor + destructor) works perfectly. If you need hook logic across multiple `.c` files, keep all `syringe_hook_install` / `syringe_hook_remove` calls in ONE file and call them from that file's constructor; other files in the same `.so` should not include `syringe_hook.h`.
+Because the registry is `static` (per-translation-unit), `syringe/hook/syringe_hook.h` must be included from **exactly one** `.c` file per `.so` / executable. The standard pattern (1 `.c` file with constructor + destructor) works perfectly. If you need hook logic across multiple `.c` files, keep all `syringe_hook_install` / `syringe_hook_remove` calls in ONE file and call them from that file's constructor; other files in the same `.so` should not include `syringe/hook/syringe_hook.h`.

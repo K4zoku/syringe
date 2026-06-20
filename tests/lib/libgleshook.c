@@ -35,7 +35,7 @@ typedef void* GLXDrawable;
 struct wl_surface;
 struct wl_proxy;
 
-#include "syringe_hook.h"
+#include "hook/syringe_hook.h"
 
 /* ── original function pointers ─────────────────────────────────────────── */
 

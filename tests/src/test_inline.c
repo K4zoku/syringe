@@ -34,7 +34,7 @@
 #include <string.h>
 #include <assert.h>
 
-#include "syringe_hook.h"
+#include "hook/syringe_hook.h"
 
 /* ── target function ──────────────────────────────────────────────────────
  *

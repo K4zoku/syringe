@@ -163,8 +163,23 @@ static int find_map(pid_t pid, const char *needle, const char *perms_must,
             if (!strchr(perms, *p)) { ok = 0; break; }
         if (!ok) continue;
 
-        /* check name */
-        if (needle && !strstr(e.name, needle)) continue;
+        /* check name — match by basename prefix to avoid false positives.
+         *
+         * BUG: strstr(name, "libc") matches libcoreclr.so, libcrypto.so,
+         * libcom_err.so, etc. because they all contain "libc" as substring.
+         * .NET apps like osu! load libcoreclr.so, which caused syringe to
+         * resolve dlopen from the wrong library → SIGSEGV.
+         *
+         * Fix: extract basename, check it starts with needle followed by
+         * '.' or end-of-string. So "libc" matches "libc.so.6" but NOT
+         * "libcoreclr.so" (which starts with "libcore", not "libc."). */
+        if (needle) {
+            const char *base = strrchr(e.name, '/');
+            base = base ? base + 1 : e.name;
+            size_t nlen = strlen(needle);
+            if (strncmp(base, needle, nlen) != 0) continue;
+            if (base[nlen] != '.' && base[nlen] != '\0') continue;
+        }
 
         *out = e;
         fclose(f);
@@ -365,6 +380,15 @@ int syringe_inject(pid_t pid, const char *so_path) {
     } else if (WIFSTOPPED(status)) {
         fprintf(stderr, "[!] Process stopped with signal %d (expected SIGTRAP)\n",
                 WSTOPSIG(status));
+        fprintf(stderr, "[!] Shellcode did NOT complete — library was NOT loaded.\n");
+        /* Still restore state before returning, so the target isn't left
+         * with corrupted memory/registers. */
+        remote_write_bytes(pid, inject_addr, orig_mem, sc_len);
+        if (syringe_arch_setregs(pid, &regs_orig) < 0) {
+            INJ_ERR("ptrace SETREGS (restore): %s", strerror(errno));
+        }
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return -1;
     } else {
         fprintf(stderr, "[!] Unexpected wait status: 0x%x\n", status);
         return -1;

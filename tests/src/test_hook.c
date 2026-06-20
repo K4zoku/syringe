@@ -69,6 +69,18 @@ static void check_ptr(void *ptr, int expect_null, const char *expr) {
     }
 }
 
+static void check_ptr_eq(void *expected, void *actual, const char *expr) {
+    tests_run++;
+    if (expected == actual) {
+        tests_pass++;
+        fprintf(stderr, "  PASS: %s\n", expr);
+    } else {
+        tests_fail++;
+        fprintf(stderr, "FAIL: %s:%d: %s — expected %p, got %p\n",
+                __FILE__, __LINE__, expr, expected, actual);
+    }
+}
+
 #define CHECK_EQ(exp, act, desc) check_int((exp), (act), desc)
 
 /* ── tests: page helpers ───────────────────────────────────────────────── */
@@ -516,9 +528,9 @@ static void test_read_dst(void) {
     syringe_hook_build_jmp(hooked, (void*)0xDEADBEEFCAFEULL);
     dst = syringe_hook_read_dst(hooked);
     check_ptr(dst, 0, "hooked prologue → non-NULL");
-#ifdef __LP64__
-    CHECK_EQ((uintptr_t)0xDEADBEEFCAFEULL, (uintptr_t)dst, "read_dst returns correct addr");
-#endif
+    #ifdef __LP64__
+        check_ptr_eq((void*)0xDEADBEEFCAFEULL, dst, "read_dst returns correct addr");
+    #endif
 
     /* NULL input */
     dst = syringe_hook_read_dst(NULL);

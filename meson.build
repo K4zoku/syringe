@@ -17,6 +17,7 @@ project_c_flags = [
     '-Wall',
     '-Wextra',
     '-O2',
+    '-Wno-pedantic',
 ]
 
 # ── Dependencies ──────────────────────────────────────────────────────────
@@ -187,7 +188,13 @@ libsyringe_dep = declare_dependency(
 
 # Suppress unused variable warnings — these are intentionally kept for
 # Meson's internal build target tracking
-_ = [syringe_cli_exe, gleshook_lib, test_sample_lib, libsyringe_dep, test_inline_exe]
+_ = [
+    syringe_cli_exe,
+    gleshook_lib,
+    test_sample_lib,
+    libsyringe_dep,
+    test_inline_exe,
+]
 
 # ══════════════════════════════════════════════════════════════════════════
 #  Summary

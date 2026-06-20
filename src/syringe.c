@@ -408,7 +408,12 @@ int syringe_inject(pid_t pid, const char *so_path) {
         } else if (WIFSTOPPED(status)) {
             /* Got a signal (SIGSEGV, SIGRT_2, etc.) — likely from another
              * thread in multi-threaded apps like .NET. Check if our
-             * shellcode thread is still running (PC in shellcode region). */
+             * shellcode thread is still running (PC in shellcode region).
+             *
+             * NOTE: PTRACE_GETREGS returns the MAIN thread's registers
+             * (the one we attached to), not necessarily the thread that
+             * sent the signal. So this check is imperfect — but it's the
+             * best we can do without PTRACE_GETEVENTMSG. */
             SyringeArchRegs regs_now;
             int from_shellcode = 0;
             if (syringe_arch_getregs(pid, &regs_now) == 0) {
@@ -429,12 +434,24 @@ int syringe_inject(pid_t pid, const char *so_path) {
                 ptrace(PTRACE_DETACH, pid, NULL, NULL);
                 return -1;
             } else {
-                /* Signal from another thread — forward and keep waiting */
+                /* Signal from another thread — SUPPRESS (don't forward).
+                 *
+                 * Forwarding fatal signals (SIGSEGV, SIGABRT, etc.) kills
+                 * the process. Instead, suppress all non-SIGTRAP signals
+                 * from other threads and keep waiting for our SIGTRAP.
+                 * The thread that sent the signal will resume without
+                 * delivering it — it might be in a slightly inconsistent
+                 * state, but the process survives. */
                 int sig = WSTOPSIG(status);
-                INJ_LOG("Signal %d from non-shellcode thread, forwarding", sig);
-                ptrace(PTRACE_CONT, pid, NULL, (void*)(long)sig);
+                INJ_LOG("Signal %d from non-shellcode thread, suppressing", sig);
+                ptrace(PTRACE_CONT, pid, NULL, NULL);
                 continue;
             }
+        } else if (WIFSIGNALED(status)) {
+            /* Process was killed by a signal — can't recover */
+            fprintf(stderr, "[!] Process killed by signal %d\n",
+                    WTERMSIG(status));
+            return -1;
         } else {
             fprintf(stderr, "[!] Unexpected wait status: 0x%x\n", status);
             return -1;

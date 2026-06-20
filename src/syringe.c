@@ -362,35 +362,90 @@ int syringe_inject(pid_t pid, const char *so_path) {
         return -1;
     }
 
-    /* ── 10. Continue and wait for trap (SIGTRAP) ── */
+    /* ── 10. Continue and wait for trap (SIGTRAP) ──
+     *
+     * Multi-threaded targets (e.g. .NET apps with 76+ threads) may
+     * deliver signals from OTHER threads while our shellcode runs in
+     * the main thread. We need to:
+     *   - Forward non-SIGTRAP signals from other threads
+     *   - Keep waiting until we get SIGTRAP from our thread
+     *   - Check RIP to confirm it's our int3 */
     INJ_LOG("Running shellcode ...");
     if (ptrace(PTRACE_CONT, pid, NULL, NULL) < 0) {
         INJ_ERR("ptrace CONT: %s", strerror(errno));
         return -1;
     }
 
-    int status;
-    if (waitpid(pid, &status, 0) < 0) {
-        INJ_ERR("waitpid (shellcode): %s", strerror(errno));
-        return -1;
+    int shellcode_done = 0;
+    int max_iterations = 100;  /* safety limit */
+    while (!shellcode_done && max_iterations-- > 0) {
+        int status;
+        if (waitpid(pid, &status, 0) < 0) {
+            INJ_ERR("waitpid (shellcode): %s", strerror(errno));
+            return -1;
+        }
+
+        if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP) {
+            /* Check if RIP is at our int3 (shellcode done) */
+            SyringeArchRegs regs_now;
+            if (syringe_arch_getregs(pid, &regs_now) == 0) {
+                unsigned long pc = syringe_arch_get_pc(&regs_now);
+                /* int3 is after: entry_skip(2) + saves + dlopen_call + ...
+                 * Just check if PC is within shellcode region */
+                if (pc >= inject_addr && pc < inject_addr + sc_len) {
+                    INJ_OK("Shellcode executed (SIGTRAP at 0x%lx)", pc);
+                    shellcode_done = 1;
+                    break;
+                }
+                /* SIGTRAP but not in our shellcode — from another thread */
+                INJ_LOG("SIGTRAP from non-shellcode thread (PC=0x%lx), continuing", pc);
+                ptrace(PTRACE_CONT, pid, NULL, (void*)(long)WSTOPSIG(status));
+                continue;
+            }
+            INJ_OK("Shellcode executed (SIGTRAP received)");
+            shellcode_done = 1;
+            break;
+        } else if (WIFSTOPPED(status)) {
+            /* Got a signal (SIGSEGV, SIGRT_2, etc.) — likely from another
+             * thread in multi-threaded apps like .NET. Check if our
+             * shellcode thread is still running (PC in shellcode region). */
+            SyringeArchRegs regs_now;
+            int from_shellcode = 0;
+            if (syringe_arch_getregs(pid, &regs_now) == 0) {
+                unsigned long pc = syringe_arch_get_pc(&regs_now);
+                if (pc >= inject_addr && pc < inject_addr + sc_len) {
+                    from_shellcode = 1;
+                }
+            }
+
+            if (from_shellcode) {
+                /* Signal from our shellcode thread — real crash */
+                fprintf(stderr, "[!] Shellcode crashed with signal %d (PC=0x%lx)\n",
+                        WSTOPSIG(status),
+                        syringe_arch_get_pc(&regs_now));
+                fprintf(stderr, "[!] Shellcode did NOT complete — library was NOT loaded.\n");
+                remote_write_bytes(pid, inject_addr, orig_mem, sc_len);
+                syringe_arch_setregs(pid, &regs_orig);
+                ptrace(PTRACE_DETACH, pid, NULL, NULL);
+                return -1;
+            } else {
+                /* Signal from another thread — forward and keep waiting */
+                int sig = WSTOPSIG(status);
+                INJ_LOG("Signal %d from non-shellcode thread, forwarding", sig);
+                ptrace(PTRACE_CONT, pid, NULL, (void*)(long)sig);
+                continue;
+            }
+        } else {
+            fprintf(stderr, "[!] Unexpected wait status: 0x%x\n", status);
+            return -1;
+        }
     }
 
-    if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP) {
-        INJ_OK("Shellcode executed (SIGTRAP received)");
-    } else if (WIFSTOPPED(status)) {
-        fprintf(stderr, "[!] Process stopped with signal %d (expected SIGTRAP)\n",
-                WSTOPSIG(status));
-        fprintf(stderr, "[!] Shellcode did NOT complete — library was NOT loaded.\n");
-        /* Still restore state before returning, so the target isn't left
-         * with corrupted memory/registers. */
+    if (!shellcode_done) {
+        fprintf(stderr, "[!] Timed out waiting for shellcode completion\n");
         remote_write_bytes(pid, inject_addr, orig_mem, sc_len);
-        if (syringe_arch_setregs(pid, &regs_orig) < 0) {
-            INJ_ERR("ptrace SETREGS (restore): %s", strerror(errno));
-        }
+        syringe_arch_setregs(pid, &regs_orig);
         ptrace(PTRACE_DETACH, pid, NULL, NULL);
-        return -1;
-    } else {
-        fprintf(stderr, "[!] Unexpected wait status: 0x%x\n", status);
         return -1;
     }
 

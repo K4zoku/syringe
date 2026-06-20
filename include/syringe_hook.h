@@ -305,9 +305,25 @@ static inline int syringe_hook_tramp_install(Trampoline *t, void *target, void *
     }
 
     /* Read the prologue bytes from the target function. If the target
-     * is in a protected region (e.g., libc with KASLR/W^X), this may fail. */
-    memcpy(t->stolen, target, TRAMP_STOLEN);
-    memcpy(t->bounce, target, TRAMP_STOLEN);
+     * is in a protected/unreadable region (e.g., vDSO, kernel trap gate),
+     * reading may segfault. Use /proc/self/mem pread as a safe shadow-read
+     * so we never dereference an invalid address directly. */
+    if (syringe_memfd < 0) syringe_hook_memfd_open();
+    if (syringe_memfd >= 0) {
+        ssize_t rd = pread(syringe_memfd, t->stolen, TRAMP_STOLEN,
+                           (off_t)(uintptr_t)target);
+        if (rd == (ssize_t)TRAMP_STOLEN) {
+            memcpy(t->bounce, t->stolen, TRAMP_STOLEN);
+        } else {
+            /* Can't read target — zero-fill. write path will fail safely. */
+            memset(t->stolen, 0, TRAMP_STOLEN);
+            memset(t->bounce, 0, TRAMP_STOLEN);
+        }
+    } else {
+        /* No /proc/self/mem: must read directly (may segfault on protected pages) */
+        memcpy(t->stolen, target, TRAMP_STOLEN);
+        memcpy(t->bounce, t->stolen, TRAMP_STOLEN);
+    }
 
     uint8_t *ret_site = (uint8_t*)target + TRAMP_STOLEN;
     syringe_hook_build_jmp(t->bounce + TRAMP_STOLEN, ret_site);
@@ -315,8 +331,8 @@ static inline int syringe_hook_tramp_install(Trampoline *t, void *target, void *
     uint8_t jmp[TRAMP_JMP_SZ];
     syringe_hook_build_jmp(jmp, hook);
     if (syringe_hook_safe_write(target, jmp, TRAMP_JMP_SZ) != 0) {
-        munmap(t->bounce, BOUNCE_SZ);
         SYRINGE_HOOK_LOG("tramp: patch failed for %p", target);
+        munmap(t->bounce, BOUNCE_SZ);
         return -1;
     }
 
@@ -516,9 +532,20 @@ static inline int syringe_hook_install(const char *sym, void *hook, void **orig_
 
     if (rec->orig_addr && rec->orig_addr != hook) {
         void *tramp_orig = NULL;
-        /* Only attempt inline trampoline if the target is writable.
-         * Hooking libc/protected functions causes SIGSEGV. */
-        if (syringe_hook_page_is_ro(rec->orig_addr) == 0) {
+        /* Only install inline trampoline for symbols with NO GOT patches.
+         * Symbols with GOT patches are already redirected via PLT/GOT,
+         * so patching the target function itself is unnecessary and dangerous
+         * (corrupts shared-library code that may call the symbol internally).
+         *
+         * For symbols WITHOUT GOT entries (intra-library calls), the trampoline
+         * is essential. syringe_hook_tramp_install() uses syringe_hook_safe_write()
+         * which has full fallback: mprotect → /proc/self/mem. */
+        if (rec->npatch > 0) {
+            /* Already hooked via GOT/PLT — no trampoline needed */
+            SYRINGE_HOOK_LOG("'%s': GOT-only (skip trampoline)", sym);
+            if (orig_out) *orig_out = rec->orig_addr;
+        } else {
+            /* No GOT entries — need trampoline for direct calls */
             if (syringe_hook_tramp_install(&rec->tramp, rec->orig_addr, hook, &tramp_orig) == 0) {
                 rec->has_tramp = 1;
                 if (orig_out) *orig_out = tramp_orig;
@@ -527,9 +554,6 @@ static inline int syringe_hook_install(const char *sym, void *hook, void **orig_
                 SYRINGE_HOOK_LOG("'%s': inline trampoline failed (GOT-only)", sym);
                 if (orig_out) *orig_out = rec->orig_addr;
             }
-        } else {
-            SYRINGE_HOOK_LOG("'%s': target is read-only, skipping trampoline", sym);
-            if (orig_out) *orig_out = rec->orig_addr;
         }
     } else {
         if (orig_out) *orig_out = rec->orig_addr;

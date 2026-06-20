@@ -31,7 +31,7 @@
 #include <dlfcn.h>
 #include <sys/mman.h>
 
-#include "syringe_hook.h"   /* pulls in syringe_hook_* API */
+#include "hook/syringe_hook.h"   /* pulls in syringe_hook_* API */
 
 /* ── assertion helpers ─────────────────────────────────────────────────── */
 

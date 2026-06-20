@@ -1,7 +1,7 @@
 project(
     'syringe',
     'c',
-    version: '0.5.1',
+    version: '0.6.0',
     default_options: [
         'warning_level=3',
         'c_std=gnu11',
@@ -75,14 +75,29 @@ syringe_lib = library(
     c_args: project_c_flags,
     include_directories: inc,
     link_args: ['-ldl', '-lpthread'],
-    version: '0.5.1',
+    version: '0.6',
     install: true,
 )
 
-# Install both public headers under subdir 'syringe/'
+# Install injector header (syringe.h) under subdir 'syringe/'
 install_headers(
-    ['include/syringe.h', 'include/syringe_hook.h'],
+    ['include/syringe.h'],
     subdir: 'syringe',
+)
+
+# Install hooker headers under subdir 'syringe/hook/'
+# Public:     syringe_hook.h (user includes this)
+# Internal:   syringe_hook_common.h, arch/* (included transitively)
+install_headers(
+    ['include/hook/syringe_hook.h',
+     'include/hook/syringe_hook_common.h'],
+    subdir: 'syringe/hook',
+)
+install_headers(
+    ['include/hook/arch/syringe_hook_arch.h',
+     'include/hook/arch/syringe_hook_x86_64.h',
+     'include/hook/arch/syringe_hook_aarch64.h'],
+    subdir: 'syringe/hook/arch',
 )
 
 # ── syringe-cli (CLI binary — links only libsyringe)

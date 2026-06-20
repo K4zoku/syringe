@@ -380,7 +380,10 @@ int syringe_inject(pid_t pid, const char *so_path) {
     int max_iterations = 100;  /* safety limit */
     while (!shellcode_done && max_iterations-- > 0) {
         int status;
-        if (waitpid(pid, &status, 0) < 0) {
+        /* waitpid returns the TID of the thread that stopped.
+         * Use __WALL to catch all threads. */
+        pid_t tid = waitpid(pid, &status, __WALL);
+        if (tid < 0) {
             INJ_ERR("waitpid (shellcode): %s", strerror(errno));
             return -1;
         }
@@ -388,35 +391,24 @@ int syringe_inject(pid_t pid, const char *so_path) {
         if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP) {
             /* Check if RIP is at our int3 (shellcode done) */
             SyringeArchRegs regs_now;
-            if (syringe_arch_getregs(pid, &regs_now) == 0) {
+            if (syringe_arch_getregs(tid, &regs_now) == 0) {
                 unsigned long pc = syringe_arch_get_pc(&regs_now);
-                /* int3 is after: entry_skip(2) + saves + dlopen_call + ...
-                 * Just check if PC is within shellcode region */
                 if (pc >= inject_addr && pc < inject_addr + sc_len) {
                     INJ_OK("Shellcode executed (SIGTRAP at 0x%lx)", pc);
                     shellcode_done = 1;
                     break;
                 }
-                /* SIGTRAP but not in our shellcode — from another thread */
-                INJ_LOG("SIGTRAP from non-shellcode thread (PC=0x%lx), continuing", pc);
-                ptrace(PTRACE_CONT, pid, NULL, (void*)(long)WSTOPSIG(status));
-                continue;
             }
-            INJ_OK("Shellcode executed (SIGTRAP received)");
-            shellcode_done = 1;
-            break;
+            /* SIGTRAP but not in our shellcode — from another thread */
+            INJ_LOG("SIGTRAP from non-shellcode thread, suppressing");
+            ptrace(PTRACE_CONT, tid, NULL, NULL);
+            continue;
         } else if (WIFSTOPPED(status)) {
-            /* Got a signal (SIGSEGV, SIGRT_2, etc.) — likely from another
-             * thread in multi-threaded apps like .NET. Check if our
-             * shellcode thread is still running (PC in shellcode region).
-             *
-             * NOTE: PTRACE_GETREGS returns the MAIN thread's registers
-             * (the one we attached to), not necessarily the thread that
-             * sent the signal. So this check is imperfect — but it's the
-             * best we can do without PTRACE_GETEVENTMSG. */
+            int sig = WSTOPSIG(status);
+            /* Check if this is our shellcode thread (PC in shellcode region) */
             SyringeArchRegs regs_now;
             int from_shellcode = 0;
-            if (syringe_arch_getregs(pid, &regs_now) == 0) {
+            if (syringe_arch_getregs(tid, &regs_now) == 0) {
                 unsigned long pc = syringe_arch_get_pc(&regs_now);
                 if (pc >= inject_addr && pc < inject_addr + sc_len) {
                     from_shellcode = 1;
@@ -426,31 +418,21 @@ int syringe_inject(pid_t pid, const char *so_path) {
             if (from_shellcode) {
                 /* Signal from our shellcode thread — real crash */
                 fprintf(stderr, "[!] Shellcode crashed with signal %d (PC=0x%lx)\n",
-                        WSTOPSIG(status),
-                        syringe_arch_get_pc(&regs_now));
-                fprintf(stderr, "[!] Shellcode did NOT complete — library was NOT loaded.\n");
+                        sig, syringe_arch_get_pc(&regs_now));
+                fprintf(stderr, "[!] Shellcode did NOT complete.\n");
                 remote_write_bytes(pid, inject_addr, orig_mem, sc_len);
                 syringe_arch_setregs(pid, &regs_orig);
                 ptrace(PTRACE_DETACH, pid, NULL, NULL);
                 return -1;
             } else {
-                /* Signal from another thread — SUPPRESS (don't forward).
-                 *
-                 * Forwarding fatal signals (SIGSEGV, SIGABRT, etc.) kills
-                 * the process. Instead, suppress all non-SIGTRAP signals
-                 * from other threads and keep waiting for our SIGTRAP.
-                 * The thread that sent the signal will resume without
-                 * delivering it — it might be in a slightly inconsistent
-                 * state, but the process survives. */
-                int sig = WSTOPSIG(status);
-                INJ_LOG("Signal %d from non-shellcode thread, suppressing", sig);
-                ptrace(PTRACE_CONT, pid, NULL, NULL);
+                /* Signal from another thread — suppress and continue THAT thread.
+                 * Use tid (not pid) so we continue the right thread. */
+                INJ_LOG("Signal %d from thread %d, suppressing", sig, tid);
+                ptrace(PTRACE_CONT, tid, NULL, NULL);
                 continue;
             }
         } else if (WIFSIGNALED(status)) {
-            /* Process was killed by a signal — can't recover */
-            fprintf(stderr, "[!] Process killed by signal %d\n",
-                    WTERMSIG(status));
+            fprintf(stderr, "[!] Process killed by signal %d\n", WTERMSIG(status));
             return -1;
         } else {
             fprintf(stderr, "[!] Unexpected wait status: 0x%x\n", status);

@@ -1,7 +1,7 @@
 project(
     'syringe',
     'c',
-    version: '0.4.0',
+    version: '0.5.1',
     default_options: [
         'warning_level=3',
         'c_std=gnu11',
@@ -74,7 +74,7 @@ syringe_lib = library(
     c_args: project_c_flags,
     include_directories: inc,
     link_args: ['-ldl', '-lpthread'],
-    version: '0.4',
+    version: '0.5.1',
     install: true,
 )
 
@@ -135,6 +135,22 @@ test_hook_exe = executable(
 
 test('hook', test_hook_exe, timeout: 30)
 
+# ── test_inline (v0.5: end-to-end inline hook with -fcf-protection) ──────
+# Builds with CET (endbr64 prologues) to exercise the length-disassembler
+# and RIP-relative fixup on real compiler-emitted code, not just hand-
+# assembled bytes. Verifies install_addr + trampoline + read_dst + remove
+# on a callable target function.
+test_inline_exe = executable(
+    'test_inline',
+    ['tests/src/test_inline.c'],
+    c_args: project_c_flags + ['-fcf-protection=full'],
+    include_directories: inc,
+    link_args: ['-ldl', '-lpthread'],
+    dependencies: [pthread_lib, dl_lib],
+)
+
+test('inline', test_inline_exe, timeout: 30)
+
 # ── test_syringe (links against libsyringe.so) ───────────────────────────
 test_syringe_exe = executable(
     'test_syringe',
@@ -171,7 +187,7 @@ libsyringe_dep = declare_dependency(
 
 # Suppress unused variable warnings — these are intentionally kept for
 # Meson's internal build target tracking
-_ = [syringe_cli_exe, gleshook_lib, test_sample_lib, libsyringe_dep]
+_ = [syringe_cli_exe, gleshook_lib, test_sample_lib, libsyringe_dep, test_inline_exe]
 
 # ══════════════════════════════════════════════════════════════════════════
 #  Summary
@@ -185,7 +201,7 @@ message(
     '  libgleshook:      inject-ready sample (EGL/GLX/SDL/Wayland hooks, header-only hooker)',
 )
 message('  libtest:          minimal test .so for injection verification')
-message('  tests:            hook, syringe')
+message('  tests:            hook, inline, syringe')
 message(
     '  install:          syringe.h + syringe_hook.h + libsyringe.so + pkg-config',
 )

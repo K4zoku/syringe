@@ -352,6 +352,14 @@ int syringe_dotnet_attach_profiler(pid_t pid,
 
     uint8_t resp_cmd = resp[17];  /* CommandId */
 
+    /* Debug: dump raw response */
+    uint16_t resp_size = get_u16le(resp + 14);
+    fprintf(stderr, "[dotnet] Response: size=%u cmdset=0x%02x cmdid=0x%02x resp_len=%zu\n",
+            resp_size, resp[16], resp_cmd, resp_len);
+    fprintf(stderr, "[dotnet] Raw: ");
+    for (size_t i = 0; i < resp_len && i < 64; i++) fprintf(stderr, "%02x ", resp[i]);
+    fprintf(stderr, "\n");
+
     if (resp_cmd == 0x00) {
         /* OK */
         fprintf(stderr, "[dotnet] AttachProfiler OK — profiler .so loaded\n");
@@ -359,7 +367,7 @@ int syringe_dotnet_attach_profiler(pid_t pid,
     } else if (resp_cmd == 0xFF) {
         /* Error — read HRESULT from payload (first 4 bytes after header) */
         uint32_t hresult = 0;
-        if (resp_len > 24) {
+        if (resp_len >= 24) {
             hresult = get_u32le(resp + 20);  /* payload starts at offset 20 */
         }
         fprintf(stderr, "[dotnet] .NET rejected AttachProfiler (HRESULT=0x%08x)\n",

@@ -43,10 +43,11 @@ public:
     /* ── IUnknown ── */
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
         if (!ppv) return E_NOTIMPL;
-        if (riid == &IID_IUnknown ||
-            riid == &IID_ICorProfilerCallback ||
-            riid == &IID_ICorProfilerCallback2 ||
-            riid == &IID_ICorProfilerCallback3) {
+        /* Compare GUID contents, NOT pointers — .NET passes its own copy */
+        if (memcmp(riid, &IID_IUnknown, sizeof(GUID)) == 0 ||
+            memcmp(riid, &IID_ICorProfilerCallback, sizeof(GUID)) == 0 ||
+            memcmp(riid, &IID_ICorProfilerCallback2, sizeof(GUID)) == 0 ||
+            memcmp(riid, &IID_ICorProfilerCallback3, sizeof(GUID)) == 0) {
             *ppv = this;
             AddRef();
             return S_OK;

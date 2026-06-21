@@ -152,10 +152,10 @@ static void test_shellcode_embeds_path(void) {
     check(found, ".so path embedded in shellcode");
 }
 
-/* ── tests: shellcode contains mov rsi, RTLD_NOW_GLOBAL ────────────────── */
+/* ── tests: shellcode contains mov esi, RTLD_NOW_GLOBAL ────────────────── */
 
 static void test_shellcode_mov_rsi(void) {
-    printf("\n[shellcode mov rsi]\n");
+    printf("\n[shellcode mov esi]\n");
 
     unsigned char buf[512];
     memset(buf, 0, sizeof(buf));
@@ -164,15 +164,18 @@ static void test_shellcode_mov_rsi(void) {
                                        "/tmp/test.so", 0);
     if (sz == 0) { printf("  SKIP: build failed\n"); return; }
 
+    /* Optimized encoding: `mov $0x102, %esi` = 0xBE imm32 (5 bytes total).
+     * Old `movabs $0x102, %rsi` = 0x48 0xBE imm64 (10 bytes) was dropped in
+     * favor of the 5-byte form because 0x102 fits in 32 bits and zero-extends. */
     int found = 0;
-    for (size_t i = 0; i + 9 <= sz; i++) {
-        if (buf[i] == 0x48 && buf[i + 1] == 0xBE) {
-            uint64_t imm;
-            memcpy(&imm, buf + i + 2, 8);
+    for (size_t i = 0; i + 5 <= sz; i++) {
+        if (buf[i] == 0xBE) {
+            uint32_t imm;
+            memcpy(&imm, buf + i + 1, 4);
             if (imm == RTLD_NOW_GLOBAL) { found = 1; break; }
         }
     }
-    check(found, "shellcode contains 'mov rsi, RTLD_NOW_GLOBAL'");
+    check(found, "shellcode contains 'mov esi, RTLD_NOW_GLOBAL'");
 }
 
 /* ── tests: shellcode contains call rax ─────────────────────────────────── */
@@ -207,9 +210,10 @@ static void test_shellcode_ends_with_ret(void) {
                                        test_path, 0);
     if (sz == 0) { printf("  SKIP: build failed\n"); return; }
 
-    /* Shellcode now has fixed layout: code + 256-byte path buffer.
-     * RET is at a fixed offset (0x50), not at sz - path_len - 1. */
-    size_t ret_pos = 0x50;  /* offset of RET in compiled shellcode */
+    /* Shellcode has fixed layout: code + 256-byte path buffer.
+     * RET is at offset 0x37 (after caller-saved-only save/restore optimization).
+     * Was 0x50 when all 15 GPRs + flags were saved. */
+    size_t ret_pos = 0x37;  /* offset of RET in compiled shellcode */
     check(buf[ret_pos] == 0xC3, "shellcode has RET at expected offset");
 }
 

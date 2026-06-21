@@ -60,18 +60,41 @@ message('  target arch:      ' + host_arch + ' → ' + arch_src)
 # Compile shellcode_x86_64.S → .o → raw binary → xxd -i → .h
 # The generated header is #include'd by arch_x86_64.c.
 #
+# Pipeline is inlined as a single `sh -c` custom_target — no wrapper script.
+# Tools are detected at configure time via find_program() so missing xxd or
+# objcopy fails fast with a clear error instead of a build-time crash.
+#
 # For architectures without a shellcode .S file (arm, riscv64),
 # arch_<arch>.c still uses the old EMIT() approach (or returns 0).
 
 shellcode_h = ''
 if host_arch == 'x86_64'
-  # Generate shellcode_x86_64.h from shellcode_x86_64.S:
-  #   gen_shellcode.sh compiles .S → .o → .bin → .h (C byte array)
+  xxd_prog     = find_program('xxd',     required: true)
+  objcopy_prog = find_program('objcopy', required: true)
+  cc_exe       = cc.cmd_array()[0]
+
+  # xxd -i derives the C array name from the input filename's basename
+  # (non-alphanumeric chars → '_'). Copying sc.bin to a file named exactly
+  # 'syringe_shellcode_x86_64' makes xxd emit the exact symbol we need:
+  #   unsigned char syringe_shellcode_x86_64[] = { ... };
+  #   unsigned int  syringe_shellcode_x86_64_len = 344;
+  # We use @OUTDIR@ (meson-managed per-target dir) for intermediate files
+  # so there's no /tmp juggling and cleanup is a one-liner.
+  # Tool paths are baked into the script string at configure time.
+  sc_cmd = 'set -e; ' + \
+           '@0@ -c -fPIC -nostdlib -fno-stack-protector @INPUT@ -o "@OUTDIR@/sc.o"; ' \
+             .format(cc_exe) + \
+           '@0@ -O binary -j .text "@OUTDIR@/sc.o" "@OUTDIR@/sc.bin"; ' \
+             .format(objcopy_prog.full_path()) + \
+           'cp "@OUTDIR@/sc.bin" "@OUTDIR@/syringe_shellcode_x86_64"; ' + \
+           '( cd "@OUTDIR@" && @0@ -i syringe_shellcode_x86_64 ) > @OUTPUT@; ' \
+             .format(xxd_prog.full_path()) + \
+           'rm -f "@OUTDIR@/sc.o" "@OUTDIR@/sc.bin" "@OUTDIR@/syringe_shellcode_x86_64"'
+
   shellcode_h = custom_target('shellcode_x86_64.h',
     input: 'src/arch/shellcode_x86_64.S',
     output: 'shellcode_x86_64.h',
-    command: [find_program('src/arch/gen_shellcode.sh'),
-              '@INPUT@', '@OUTPUT@', 'syringe_shellcode_x86_64'],
+    command: ['sh', '-c', sc_cmd],
     build_by_default: true,
   )
 endif

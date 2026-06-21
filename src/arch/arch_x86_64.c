@@ -40,28 +40,30 @@ _Static_assert(sizeof(struct user_regs_struct) <= SYRINGE_ARCH_REGS_MAX,
 
 /* ── Shellcode (compiled from shellcode_x86_64.S) ──────────────────────
  *
- * The shellcode binary is generated at build time by meson:
+ * The shellcode binary is generated at build time:
  *   gcc -c shellcode_x86_64.S → objcopy -O binary → xxd -i → shellcode_x86_64.h
+ * The pipeline is inlined in meson.build as a custom_target — no wrapper
+ * script. xxd and objcopy are found via find_program() at configure time.
  *
  * Layout (see shellcode_x86_64.S for full documentation):
- *   [0x00] nop; nop; pushfq; push rax-r15     (save state)
- *   [0x1A] lea rdi, [rip+0x37]                (path string, PC-relative)
- *   [0x27] movabs $0x102, %rsi                (RTLD_NOW|RTLD_GLOBAL)
- *   [0x2B] movabs $0, %rax                    (dlopen addr — PATCHED)
- *   [0x3B] call *%rax                         (call dlopen)
- *   [0x3D] int3                               (SIGTRAP)
- *   [0x3E] pop r15-rax; popfq; ret            (restore + return)
- *   [0x58] path: 256 bytes                    (so_path — PATCHED)
+ *   [0x00] nop; nop; pushfq; push rax,rcx,rdx,rsi,rdi,r8-r11   (save state)
+ *   [0x10] lea rdi, [rip+0x21]               (path string @ 0x38, PC-relative)
+ *   [0x17] mov $0x102, %esi                  (RTLD_NOW|RTLD_GLOBAL, zero-extends)
+ *   [0x1C] movabs $0, %rax                   (dlopen addr — PATCHED at 0x1E)
+ *   [0x26] call *%rax                        (call dlopen)
+ *   [0x28] int3                              (SIGTRAP)
+ *   [0x29] pop r11-r8,rax-rdi; popfq; ret    (restore + return @ 0x37)
+ *   [0x38] path: 256 bytes                   (so_path — PATCHED)
  *
  * Two runtime patches:
- *   1. dlopen_addr at offset 0x2B+2 (the imm64 in movabs)
- *   2. so_path at offset 0x58 (256 bytes, NUL-terminated)
+ *   1. dlopen_addr at offset 0x1E (imm64 value inside movabs $0, %rax)
+ *   2. so_path at offset 0x38 (256 bytes, NUL-terminated)
  */
 
 /* Offsets into the shellcode binary (must match shellcode_x86_64.S layout).
  * These are verified at build time by the test suite. */
-#define SC_DLOPEN_ADDR_OFF   0x2D   /* offset of dlopen addr imm64 value */
-#define SC_PATH_OFF          0x58   /* offset of path string region */
+#define SC_DLOPEN_ADDR_OFF   0x1E   /* offset of dlopen addr imm64 value */
+#define SC_PATH_OFF          0x38   /* offset of path string region */
 #define SC_PATH_MAX          256    /* max path length (space reserved in .S) */
 
 /* Generated header (in build dir) — contains syringe_shellcode_x86_64[]

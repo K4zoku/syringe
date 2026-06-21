@@ -71,19 +71,28 @@ shellcode_h = ''
 if host_arch == 'x86_64'
   xxd_prog     = find_program('xxd',     required: true)
   objcopy_prog = find_program('objcopy', required: true)
-  cc_exe       = cc.cmd_array()[0]
+
+  # cc.cmd_array() returns the full compiler invocation prefix, e.g.
+  #   ['cc']                — direct compiler
+  #   ['ccache', 'cc']      — ccache wrapper (common on distro build systems)
+  #   ['sccache', 'gcc']    — sccache wrapper
+  #   ['aarch64-linux-gnu-gcc']  — cross-compiler
+  # We must use the WHOLE array (joined with spaces), not just [0], otherwise
+  # invoking `ccache -c -fPIC ...` fails with "ccache: invalid option -- 'f'"
+  # because ccache expects `ccache <compiler> <args>`.
+  cc_cmd = ' '.join(cc.cmd_array())
 
   # xxd -i derives the C array name from the input filename's basename
   # (non-alphanumeric chars → '_'). Copying sc.bin to a file named exactly
   # 'syringe_shellcode_x86_64' makes xxd emit the exact symbol we need:
   #   unsigned char syringe_shellcode_x86_64[] = { ... };
-  #   unsigned int  syringe_shellcode_x86_64_len = 344;
+  #   unsigned int  syringe_shellcode_x86_64_len = 312;
   # We use @OUTDIR@ (meson-managed per-target dir) for intermediate files
   # so there's no /tmp juggling and cleanup is a one-liner.
   # Tool paths are baked into the script string at configure time.
   sc_cmd = 'set -e; ' + \
            '@0@ -c -fPIC -nostdlib -fno-stack-protector @INPUT@ -o "@OUTDIR@/sc.o"; ' \
-             .format(cc_exe) + \
+             .format(cc_cmd) + \
            '@0@ -O binary -j .text "@OUTDIR@/sc.o" "@OUTDIR@/sc.bin"; ' \
              .format(objcopy_prog.full_path()) + \
            'cp "@OUTDIR@/sc.bin" "@OUTDIR@/syringe_shellcode_x86_64"; ' + \

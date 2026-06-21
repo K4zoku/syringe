@@ -54,6 +54,29 @@ arch_src = arch_srcs[host_arch]
 message('  target arch:      ' + host_arch + ' → ' + arch_src)
 
 # ══════════════════════════════════════════════════════════════════════════
+#  SHELLCODE GENERATION (x86-64 only for now)
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Compile shellcode_x86_64.S → .o → raw binary → xxd -i → .h
+# The generated header is #include'd by arch_x86_64.c.
+#
+# For architectures without a shellcode .S file (arm, riscv64),
+# arch_<arch>.c still uses the old EMIT() approach (or returns 0).
+
+shellcode_h = ''
+if host_arch == 'x86_64'
+  # Generate shellcode_x86_64.h from shellcode_x86_64.S:
+  #   gen_shellcode.sh compiles .S → .o → .bin → .h (C byte array)
+  shellcode_h = custom_target('shellcode_x86_64.h',
+    input: 'src/arch/shellcode_x86_64.S',
+    output: 'shellcode_x86_64.h',
+    command: [find_program('src/arch/gen_shellcode.sh'),
+              '@INPUT@', '@OUTPUT@', 'syringe_shellcode_x86_64'],
+    build_by_default: true,
+  )
+endif
+
+# ══════════════════════════════════════════════════════════════════════════
 #  TARGETS
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -69,11 +92,15 @@ message('  target arch:      ' + host_arch + ' → ' + arch_src)
 #
 # The GOT/PLT hooker (syringe_hook.h) is HEADER-ONLY — no separate .so
 # to link. Consumers just #include "syringe_hook.h" from one .c file.
+syringe_lib_sources = ['src/syringe.c', arch_src]
+if host_arch == 'x86_64'
+  syringe_lib_sources += shellcode_h
+endif
 syringe_lib = library(
     'syringe',
-    ['src/syringe.c', arch_src],
+    syringe_lib_sources,
     c_args: project_c_flags,
-    include_directories: inc,
+    include_directories: [inc, include_directories('.')],
     link_args: ['-ldl', '-lpthread'],
     version: '0.6',
     install: true,

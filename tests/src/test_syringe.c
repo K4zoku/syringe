@@ -207,9 +207,10 @@ static void test_shellcode_ends_with_ret(void) {
                                        test_path, 0);
     if (sz == 0) { printf("  SKIP: build failed\n"); return; }
 
-    size_t path_len = strlen(test_path) + 1;
-    size_t ret_pos = sz - path_len - 1;
-    check(buf[ret_pos] == 0xC3, "shellcode ends with RET");
+    /* Shellcode now has fixed layout: code + 256-byte path buffer.
+     * RET is at a fixed offset (0x50), not at sz - path_len - 1. */
+    size_t ret_pos = 0x50;  /* offset of RET in compiled shellcode */
+    check(buf[ret_pos] == 0xC3, "shellcode has RET at expected offset");
 }
 
 /* ── tests: shellcode buffer overflow protection ───────────────────────── */

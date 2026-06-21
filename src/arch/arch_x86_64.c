@@ -38,6 +38,36 @@ _Static_assert(sizeof(struct user_regs_struct) <= SYRINGE_ARCH_REGS_MAX,
 /* RTLD_NOW(2) | RTLD_GLOBAL(0x100) — emitted as the dlopen() flags arg. */
 #define RTLD_NOW_GLOBAL  0x102
 
+/* ── Shellcode (compiled from shellcode_x86_64.S) ──────────────────────
+ *
+ * The shellcode binary is generated at build time by meson:
+ *   gcc -c shellcode_x86_64.S → objcopy -O binary → xxd -i → shellcode_x86_64.h
+ *
+ * Layout (see shellcode_x86_64.S for full documentation):
+ *   [0x00] nop; nop; pushfq; push rax-r15     (save state)
+ *   [0x1A] lea rdi, [rip+0x37]                (path string, PC-relative)
+ *   [0x27] movabs $0x102, %rsi                (RTLD_NOW|RTLD_GLOBAL)
+ *   [0x2B] movabs $0, %rax                    (dlopen addr — PATCHED)
+ *   [0x3B] call *%rax                         (call dlopen)
+ *   [0x3D] int3                               (SIGTRAP)
+ *   [0x3E] pop r15-rax; popfq; ret            (restore + return)
+ *   [0x58] path: 256 bytes                    (so_path — PATCHED)
+ *
+ * Two runtime patches:
+ *   1. dlopen_addr at offset 0x2B+2 (the imm64 in movabs)
+ *   2. so_path at offset 0x58 (256 bytes, NUL-terminated)
+ */
+
+/* Offsets into the shellcode binary (must match shellcode_x86_64.S layout).
+ * These are verified at build time by the test suite. */
+#define SC_DLOPEN_ADDR_OFF   0x2D   /* offset of dlopen addr imm64 value */
+#define SC_PATH_OFF          0x58   /* offset of path string region */
+#define SC_PATH_MAX          256    /* max path length (space reserved in .S) */
+
+/* Generated header (in build dir) — contains syringe_shellcode_x86_64[]
+ * and syringe_shellcode_x86_64_len */
+#include "shellcode_x86_64.h"
+
 /* ── shellcode builder ──────────────────────────────────────────────────── */
 
 size_t syringe_arch_build_shellcode(unsigned char *buf, size_t bufsz,
@@ -45,109 +75,30 @@ size_t syringe_arch_build_shellcode(unsigned char *buf, size_t bufsz,
                                      const char *so_path,
                                      unsigned long inject_addr) {
     (void)inject_addr; /* RIP-relative displacement is independent of base */
-    unsigned char *p = buf;
 
-#define EMIT(...)  do {                                           \
-    unsigned char _b[] = {__VA_ARGS__};                          \
-    if (p - buf + sizeof(_b) >= bufsz) {                         \
-        fprintf(stderr, "[!] shellcode buffer overflow at %zu\n", \
-                p - buf);                                         \
-        return 0;                                                 \
-    }                                                            \
-    memcpy(p, _b, sizeof(_b)); p += sizeof(_b);                  \
-} while(0)
-
-#define EMIT64(v) do { uint64_t _v = (uint64_t)(v); \
-    memcpy(p, &_v, 8); p += 8; } while(0)
-
-#define EMIT32(v) do { uint32_t _v = (uint32_t)(v); \
-    memcpy(p, &_v, 4); p += 4; } while(0)
-
-    /* Entry NOPs for ptrace RIP-2 quirk */
-    EMIT(0x90, 0x90);                    /* nop nop */
-
-    /* Save flags + all GPRs */
-    EMIT(0x9C);                          /* pushfq */
-    EMIT(0x50);                          /* push rax */
-    EMIT(0x51);                          /* push rcx */
-    EMIT(0x52);                          /* push rdx */
-    EMIT(0x53);                          /* push rbx */
-    EMIT(0x55);                          /* push rbp */
-    EMIT(0x56);                          /* push rsi */
-    EMIT(0x57);                          /* push rdi */
-    EMIT(0x41,0x50);                     /* push r8  */
-    EMIT(0x41,0x51);                     /* push r9  */
-    EMIT(0x41,0x52);                     /* push r10 */
-    EMIT(0x41,0x53);                     /* push r11 */
-    EMIT(0x41,0x54);                     /* push r12 */
-    EMIT(0x41,0x55);                     /* push r13 */
-    EMIT(0x41,0x56);                     /* push r14 */
-    EMIT(0x41,0x57);                     /* push r15 */
-
-    /* lea rdi, [rip + offset_to_path]
-     * RIP after the lea+modrm+sib+disp4 = p+7
-     * path string starts after the entire preamble; we'll fill offset below */
-    size_t lea_offset_pos = (size_t)(p - buf) + 3; /* position of the 32-bit disp */
-    EMIT(0x48, 0x8D, 0x3D);             /* lea rdi, [rip+disp32] */
-    EMIT32(0);                           /* placeholder */
-
-    /* mov rsi, RTLD_NOW|RTLD_GLOBAL */
-    EMIT(0x48, 0xBE);                    /* mov rsi, imm64 */
-    EMIT64((uint64_t)RTLD_NOW_GLOBAL);
-
-    /* mov rax, dlopen_addr */
-    EMIT(0x48, 0xB8);                    /* mov rax, imm64 */
-    EMIT64(dlopen_addr);
-
-    /* call rax */
-    EMIT(0xFF, 0xD0);
-
-    /* int3 — trap so the injector can continue */
-    EMIT(0xCC);
-
-    /* Restore all GPRs + flags */
-    EMIT(0x41,0x5F);                     /* pop r15 */
-    EMIT(0x41,0x5E);                     /* pop r14 */
-    EMIT(0x41,0x5D);                     /* pop r13 */
-    EMIT(0x41,0x5C);                     /* pop r12 */
-    EMIT(0x41,0x5B);                     /* pop r11 */
-    EMIT(0x41,0x5A);                     /* pop r10 */
-    EMIT(0x41,0x59);                     /* pop r9  */
-    EMIT(0x41,0x58);                     /* pop r8  */
-    EMIT(0x5F);                          /* pop rdi */
-    EMIT(0x5E);                          /* pop rsi */
-    EMIT(0x5D);                          /* pop rbp */
-    EMIT(0x5B);                          /* pop rbx */
-    EMIT(0x5A);                          /* pop rdx */
-    EMIT(0x59);                          /* pop rcx */
-    EMIT(0x58);                          /* pop rax */
-    EMIT(0x9D);                          /* popfq  */
-
-    /* ret — we'll fix up RIP separately after restoring registers */
-    EMIT(0xC3);
-
-    /* ── path string ── */
-    size_t path_start = (size_t)(p - buf);
-    size_t path_len   = strlen(so_path) + 1;
-    if (p - buf + path_len >= bufsz) {
-        fprintf(stderr, "[!] shellcode buffer overflow (path) at %zu\n",
-                p - buf);
+    size_t sc_len = syringe_shellcode_x86_64_len;
+    if (sc_len > bufsz) {
+        fprintf(stderr, "[!] shellcode buffer too small: need %zu, have %zu\n",
+                sc_len, bufsz);
         return 0;
     }
-    memcpy(p, so_path, path_len);
-    p += path_len;
 
-    /* patch the lea displacement:
-     * displacement = path_start - (lea_offset_pos + 4)
-     * because RIP after the lea instruction = inject_addr + lea_offset_pos + 4 */
-    int32_t disp = (int32_t)(path_start - (lea_offset_pos + 4));
-    memcpy(buf + lea_offset_pos, &disp, 4);
+    /* Copy template into output buffer */
+    memcpy(buf, syringe_shellcode_x86_64, sc_len);
 
-    return (size_t)(p - buf);
+    /* Patch 1: dlopen address (movabs $0, %rax → movabs $addr, %rax) */
+    memcpy(buf + SC_DLOPEN_ADDR_OFF, &dlopen_addr, sizeof(dlopen_addr));
 
-#undef EMIT
-#undef EMIT64
-#undef EMIT32
+    /* Patch 2: .so path string */
+    size_t path_len = strlen(so_path) + 1;  /* include NUL */
+    if (path_len > SC_PATH_MAX) {
+        fprintf(stderr, "[!] shellcode path too long: %zu > %d\n",
+                path_len, SC_PATH_MAX);
+        return 0;
+    }
+    memcpy(buf + SC_PATH_OFF, so_path, path_len);
+
+    return sc_len;
 }
 
 /* ── register access ────────────────────────────────────────────────────── */

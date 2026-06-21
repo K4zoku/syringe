@@ -29,6 +29,7 @@
 #endif
 
 #include "syringe.h"
+#include "dotnet/dotnet_diagnostic.h"  /* .NET auto-detect */
 
 /* ── pre-flight ptrace capability check ───────────────────────────────────
  *
@@ -260,14 +261,29 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Pre-flight: check ptrace capability + yama scope. Fail fast if
-     * ptrace won't work at all (saves scanning 600+ regions for EPERM). */
-    if (check_ptrace_capability(pid) < 0) {
-        return 1;
+    /* Pre-flight: check ptrace capability + yama scope.
+        * Skip if target is .NET — syringe_inject will auto-detect and use
+        * diagnostic IPC (no ptrace needed, bypasses anti-debug). */
+    char dotnet_sock[128];
+    int is_dotnet = (syringe_dotnet_find_socket(pid, dotnet_sock, sizeof(dotnet_sock)) == 0);
+    if (!is_dotnet) {
+        if (check_ptrace_capability(pid) < 0) {
+            return 1;
+        }
     }
 
     setup_quiet_mode();
-    int ret = syringe_inject_with_retry(pid, so_path, retry_count, retry_delay_ms);
+    /* Use syringe_inject (auto-detects .NET → diagnostic IPC, else ptrace).
+     * If user specified --retry or --delay, call syringe_inject_with_retry
+     * directly (but only for non-.NET targets — .NET path ignores those). */
+    int ret;
+    if (is_dotnet) {
+        fprintf(stderr, "[+] .NET process detected — using diagnostic IPC "
+                "(bypasses ptrace + anti-debug)\n");
+        ret = syringe_inject_dotnet(pid, so_path);
+    } else {
+        ret = syringe_inject_with_retry(pid, so_path, retry_count, retry_delay_ms);
+    }
     restore_quiet_mode();
 
     return (ret == 0) ? 0 : 1;

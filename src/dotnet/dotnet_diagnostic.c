@@ -34,6 +34,7 @@
 
 #define _GNU_SOURCE
 #include "dotnet/dotnet_diagnostic.h"
+#include "syringe.h"  /* syringe_verbose */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -81,7 +82,7 @@ static uint32_t get_u32le(const uint8_t *buf) {
 int syringe_dotnet_find_socket(pid_t pid, char *out_path, size_t path_size) {
     DIR *d = opendir("/tmp");
     if (!d) {
-        fprintf(stderr, "[dotnet] opendir(/tmp): %s\n", strerror(errno));
+        fprintf(stderr, "[!] [dotnet] opendir(/tmp): %s\n", strerror(errno));
         return -1;
     }
 
@@ -229,7 +230,7 @@ static int send_and_recv(const char *socket_path,
                           size_t *out_len) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
-        fprintf(stderr, "[dotnet] socket(): %s\n", strerror(errno));
+        fprintf(stderr, "[!] [dotnet] socket(): %s\n", strerror(errno));
         return -1;
     }
 
@@ -238,14 +239,14 @@ static int send_and_recv(const char *socket_path,
     addr.sun_family = AF_UNIX;
     size_t path_len = strlen(socket_path);
     if (path_len >= sizeof(addr.sun_path)) {
-        fprintf(stderr, "[dotnet] socket path too long: %s\n", socket_path);
+        if (syringe_verbose) fprintf(stderr, "[*] [dotnet] socket path too long: %s\n", socket_path);
         close(fd);
         return -1;
     }
     memcpy(addr.sun_path, socket_path, path_len + 1);
 
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        fprintf(stderr, "[dotnet] connect(%s): %s\n", socket_path, strerror(errno));
+        fprintf(stderr, "[!] [dotnet] connect(%s): %s\n", socket_path, strerror(errno));
         close(fd);
         return -1;
     }
@@ -255,7 +256,7 @@ static int send_and_recv(const char *socket_path,
     while ((size_t)sent < msg_len) {
         ssize_t n = write(fd, msg + sent, msg_len - sent);
         if (n < 0) {
-            fprintf(stderr, "[dotnet] write: %s\n", strerror(errno));
+            fprintf(stderr, "[!] [dotnet] write: %s\n", strerror(errno));
             close(fd);
             return -1;
         }
@@ -267,12 +268,12 @@ static int send_and_recv(const char *socket_path,
     while (recvd < 20) {
         ssize_t n = read(fd, resp_buf + recvd, 20 - recvd);
         if (n < 0) {
-            fprintf(stderr, "[dotnet] read header: %s\n", strerror(errno));
+            fprintf(stderr, "[!] [dotnet] read header: %s\n", strerror(errno));
             close(fd);
             return -1;
         }
         if (n == 0) {
-            fprintf(stderr, "[dotnet] connection closed by server\n");
+            if (syringe_verbose) fprintf(stderr, "[*] [dotnet] connection closed by server\n");
             close(fd);
             return -1;
         }
@@ -283,7 +284,7 @@ static int send_and_recv(const char *socket_path,
     uint16_t total_size = get_u16le(resp_buf + 14);
     if (total_size < 20) total_size = 20;  /* sanity */
     if (total_size > resp_buf_size) {
-        fprintf(stderr, "[dotnet] response too large: %u > %zu\n", total_size, resp_buf_size);
+        if (syringe_verbose) fprintf(stderr, "[*] [dotnet] response too large: %u > %zu\n", total_size, resp_buf_size);
         total_size = resp_buf_size;  /* truncate */
     }
 
@@ -291,7 +292,7 @@ static int send_and_recv(const char *socket_path,
     while (recvd < total_size) {
         ssize_t n = read(fd, resp_buf + recvd, total_size - recvd);
         if (n < 0) {
-            fprintf(stderr, "[dotnet] read payload: %s\n", strerror(errno));
+            fprintf(stderr, "[!] [dotnet] read payload: %s\n", strerror(errno));
             break;  /* we have at least the header */
         }
         if (n == 0) break;  /* server closed early */
@@ -310,29 +311,29 @@ int syringe_dotnet_attach_profiler(pid_t pid,
                                     const void *client_data,
                                     size_t client_len) {
     if (!profiler_path) {
-        fprintf(stderr, "[dotnet] profiler_path is NULL\n");
+        fprintf(stderr, "[!] [dotnet] profiler_path is NULL\n");
         return SYRINGE_DOTNET_ERROR;
     }
 
     /* Find diagnostic socket */
     char socket_path[128];
     if (syringe_dotnet_find_socket(pid, socket_path, sizeof(socket_path)) < 0) {
-        fprintf(stderr, "[dotnet] No diagnostic socket for pid %d "
+        fprintf(stderr, "[!] [dotnet] No diagnostic socket for pid %d "
                 "(not a .NET process, or diagnostics disabled)\n", pid);
         return SYRINGE_DOTNET_NO_SOCKET;
     }
-    fprintf(stderr, "[dotnet] Found diagnostic socket: %s\n", socket_path);
+    if (syringe_verbose) fprintf(stderr, "[*] [dotnet] Found diagnostic socket: %s\n", socket_path);
 
     /* Build AttachProfiler message */
     size_t msg_len = 0;
     uint8_t *msg = build_attach_profiler_msg(profiler_path, client_data,
                                               client_len, &msg_len);
     if (!msg) {
-        fprintf(stderr, "[dotnet] Failed to build IPC message\n");
+        fprintf(stderr, "[!] [dotnet] Failed to build IPC message\n");
         return SYRINGE_DOTNET_ERROR;
     }
 
-    fprintf(stderr, "[dotnet] Sending AttachProfiler (profiler=%s, %zu bytes client_data)\n",
+    if (syringe_verbose) fprintf(stderr, "[*] [dotnet] Sending AttachProfiler (profiler=%s, %zu bytes client_data)\n",
             profiler_path, client_len);
 
     /* Send + receive full response */
@@ -346,7 +347,7 @@ int syringe_dotnet_attach_profiler(pid_t pid,
 
     /* Parse response */
     if (memcmp(resp, "DOTNET_IPC_V1\0", 14) != 0) {
-        fprintf(stderr, "[dotnet] Bad response magic\n");
+        fprintf(stderr, "[!] [dotnet] Bad response magic\n");
         return SYRINGE_DOTNET_ERROR;
     }
 
@@ -354,15 +355,15 @@ int syringe_dotnet_attach_profiler(pid_t pid,
 
     /* Debug: dump raw response */
     uint16_t resp_size = get_u16le(resp + 14);
-    fprintf(stderr, "[dotnet] Response: size=%u cmdset=0x%02x cmdid=0x%02x resp_len=%zu\n",
+    if (syringe_verbose) fprintf(stderr, "[*] [dotnet] Response: size=%u cmdset=0x%02x cmdid=0x%02x resp_len=%zu\n",
             resp_size, resp[16], resp_cmd, resp_len);
-    fprintf(stderr, "[dotnet] Raw: ");
+    if (syringe_verbose) fprintf(stderr, "[*] [dotnet] Raw: ");
     for (size_t i = 0; i < resp_len && i < 64; i++) fprintf(stderr, "%02x ", resp[i]);
     fprintf(stderr, "\n");
 
     if (resp_cmd == 0x00) {
         /* OK */
-        fprintf(stderr, "[dotnet] AttachProfiler OK — profiler .so loaded\n");
+        if (syringe_verbose) fprintf(stderr, "[*] [dotnet] AttachProfiler OK — profiler .so loaded\n");
         return SYRINGE_DOTNET_OK;
     } else if (resp_cmd == 0xFF) {
         /* Error — read HRESULT from payload (first 4 bytes after header) */
@@ -371,24 +372,24 @@ int syringe_dotnet_attach_profiler(pid_t pid,
             hresult = get_u32le(resp + 20);  /* payload starts at offset 20 */
         }
         if (hresult == 0x80040154) {
-            fprintf(stderr, "[dotnet] Injected OK\n");
+            if (syringe_verbose) fprintf(stderr, "[*] [dotnet] Injected OK\n");
             return SYRINGE_DOTNET_OK;
         }
 
-        fprintf(stderr, "[dotnet] .NET rejected AttachProfiler (HRESULT=0x%08x)\n",
+        fprintf(stderr, "[!] [dotnet] .NET rejected AttachProfiler (HRESULT=0x%08x)\n",
                 hresult);
 
         /* Map common HRESULTs to readable messages */
         if (hresult == 0x8013136A) {
-            fprintf(stderr, "[dotnet]   → CORPROF_E_PROFILER_ALREADY_ACTIVE: "
+            if (syringe_verbose) fprintf(stderr, "[*] [dotnet]   → CORPROF_E_PROFILER_ALREADY_ACTIVE: "
                     "a profiler is already attached.\n");
-            fprintf(stderr, "[dotnet]     Restart the target process and try again.\n");
+            if (syringe_verbose) fprintf(stderr, "[*] [dotnet]     Restart the target process and try again.\n");
         } else if (hresult == 0x80131385) {
-            fprintf(stderr, "[dotnet]   → Unknown command\n");
+            if (syringe_verbose) fprintf(stderr, "[*] [dotnet]   → Unknown command\n");
         } else if (hresult == 0x80070057) {
-            fprintf(stderr, "[dotnet]   → Invalid argument (check profiler path/GUID)\n");
+            if (syringe_verbose) fprintf(stderr, "[*] [dotnet]   → Invalid argument (check profiler path/GUID)\n");
         } else if (hresult == 0x80131515) {
-            fprintf(stderr, "[dotnet]   → Not supported\n");
+            if (syringe_verbose) fprintf(stderr, "[*] [dotnet]   → Not supported\n");
         }
 
         /* If there's an error message string after HRESULT, print it */
@@ -396,7 +397,7 @@ int syringe_dotnet_attach_profiler(pid_t pid,
             uint32_t msg_len = get_u32le(resp + 24);
             if (msg_len > 0 && 28 + msg_len * 2 <= resp_len) {
                 /* UTF-16LE error message — print as ASCII approximation */
-                fprintf(stderr, "[dotnet]   Error message: ");
+                fprintf(stderr, "[!] [dotnet]   Error message: ");
                 for (uint32_t i = 0; i < msg_len && 28 + i * 2 < resp_len; i++) {
                     char c = resp[28 + i * 2];
                     if (c >= 32 && c < 127) fputc(c, stderr);
@@ -408,14 +409,14 @@ int syringe_dotnet_attach_profiler(pid_t pid,
 
         return SYRINGE_DOTNET_REJECTED;
     } else {
-        fprintf(stderr, "[dotnet] Unexpected response CommandId=0x%02x\n", resp_cmd);
+        fprintf(stderr, "[!] [dotnet] Unexpected response CommandId=0x%02x\n", resp_cmd);
         return SYRINGE_DOTNET_ERROR;
     }
 }
 
 int syringe_inject_dotnet(pid_t pid, const char *so_path) {
     if (!so_path) {
-        fprintf(stderr, "[dotnet] so_path is NULL\n");
+        fprintf(stderr, "[!] [dotnet] so_path is NULL\n");
         return SYRINGE_DOTNET_ERROR;
     }
 
@@ -423,7 +424,7 @@ int syringe_inject_dotnet(pid_t pid, const char *so_path) {
      * different process with potentially different CWD. */
     char abs_path[4096];
     if (!realpath(so_path, abs_path)) {
-        fprintf(stderr, "[dotnet] realpath('%s'): %s\n", so_path, strerror(errno));
+        fprintf(stderr, "[!] [dotnet] realpath('%s'): %s\n", so_path, strerror(errno));
         return SYRINGE_DOTNET_ERROR;
     }
 
@@ -436,7 +437,7 @@ int syringe_inject_dotnet(pid_t pid, const char *so_path) {
         write(wfd, abs_path, strlen(abs_path));
         close(wfd);
     } else {
-        fprintf(stderr, "[dotnet] Warning: cannot write /tmp/woverlay_path\n");
+        if (syringe_verbose) fprintf(stderr, "[*] [dotnet] Warning: cannot write /tmp/woverlay_path\n");
     }
 
     /* Find syringe-dotnet-profiler.so — the COM profiler wrapper that
@@ -454,7 +455,7 @@ int syringe_inject_dotnet(pid_t pid, const char *so_path) {
         /* Resolve to absolute — the CLR's dlopen runs in osu's process
          * with potentially different CWD than our terminal. */
         if (!realpath(env, profiler_path)) {
-            fprintf(stderr, "[dotnet] realpath('%s'): %s\n", env, strerror(errno));
+            fprintf(stderr, "[!] [dotnet] realpath('%s'): %s\n", env, strerror(errno));
             return SYRINGE_DOTNET_ERROR;
         }
     } else {

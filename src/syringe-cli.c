@@ -99,7 +99,7 @@ static int check_ptrace_capability(pid_t target_pid) {
     /* Decision matrix: */
     if (has_cap_sys_ptrace) {
         /* CAP_SYS_PTRACE bypasses yama restrictions entirely. */
-        fprintf(stderr, "[+] CAP_SYS_PTRACE present — ptrace will work "
+        if (syringe_verbose) fprintf(stderr, "[+] CAP_SYS_PTRACE present — ptrace will work "
                 "(yama ptrace_scope=%d ignored)\n", yama_scope);
         return 0;
     }
@@ -134,7 +134,7 @@ static int check_ptrace_capability(pid_t target_pid) {
             }
             fclose(sf);
             if (target_ppid == getpid()) {
-                fprintf(stderr, "[+] yama ptrace_scope=1 — we are parent of "
+                if (syringe_verbose) fprintf(stderr, "[+] yama ptrace_scope=1 — we are parent of "
                         "target (ppid=%d), ptrace allowed\n", target_ppid);
                 return 0;
             }
@@ -148,7 +148,7 @@ static int check_ptrace_capability(pid_t target_pid) {
     }
 
     /* yama_scope == 0: classic ptrace permissions. */
-    fprintf(stderr, "[+] yama ptrace_scope=0 (classic) — ptrace allowed\n");
+    if (syringe_verbose) fprintf(stderr, "[+] yama ptrace_scope=0 (classic) — ptrace allowed\n");
     return 0;
 }
 
@@ -161,7 +161,7 @@ static void print_usage(const char *prog) {
         "Usage:\n"
         "  %s [OPTIONS] <pid> <library.so>\n\n"
         "Options:\n"
-        "  -q, --quiet       Suppress all output except errors\n"
+        "  -v, --verbose    Enable info logging (default: silent)\n"
         "  -r, --retry N     Try up to N executable regions on failure\n"
         "                    (default: 3)\n"
         "                    Use -1 or 'all' to try every region\n"
@@ -169,7 +169,7 @@ static void print_usage(const char *prog) {
         "                    Also sets thread-wait timeout (10x this value)\n\n"
         "Examples:\n"
         "  syringe-cli 10024 ./liboverlay.so\n"
-        "  syringe-cli --quiet 10024 /usr/local/lib/libhook.so\n"
+        "  syringe-cli -v 10024 /usr/local/lib/libhook.so\n"
         "  syringe-cli --retry all 10024 ./liboverlay.so   # try every region\n"
         "  syringe-cli -r 5 10024 ./liboverlay.so          # try up to 5 regions\n"
         "  syringe-cli -r 1 -d 500 10024 ./lib.so          # 1 region, 500ms wait\n\n"
@@ -186,32 +186,17 @@ static void print_usage(const char *prog) {
         prog);
 }
 
-/* ── quiet mode flag ───────────────────────────────────────────────────── */
-static int quiet_mode = 0;
+/* ── flags ─────────────────────────────────────────────────────────────── */
 static int retry_count = 3;     /* default: try up to 3 regions */
 static int retry_delay_ms = 100; /* default: 100ms between attempts */
-FILE *original_stderr = NULL;
-
-static void setup_quiet_mode(void) {
-    if (!quiet_mode) return;
-    original_stderr = stderr;
-    stderr = fopen("/dev/null", "w");
-}
-
-static void restore_quiet_mode(void) {
-    if (original_stderr) {
-        fclose(stderr);
-        stderr = original_stderr;
-    }
-}
 
 int main(int argc, char *argv[]) {
     int arg_idx = 1;
 
     /* parse optional flags */
     while (arg_idx < argc) {
-        if (strcmp(argv[arg_idx], "-q") == 0 || strcmp(argv[arg_idx], "--quiet") == 0) {
-            quiet_mode = 1;
+        if (strcmp(argv[arg_idx], "-v") == 0 || strcmp(argv[arg_idx], "--verbose") == 0) {
+            syringe_verbose = 1;
             arg_idx++;
         } else if (strcmp(argv[arg_idx], "-r") == 0 || strcmp(argv[arg_idx], "--retry") == 0) {
             if (arg_idx + 1 >= argc) {
@@ -272,19 +257,14 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    setup_quiet_mode();
-    /* Use syringe_inject (auto-detects .NET → diagnostic IPC, else ptrace).
-     * If user specified --retry or --delay, call syringe_inject_with_retry
-     * directly (but only for non-.NET targets — .NET path ignores those). */
     int ret;
     if (is_dotnet) {
-        fprintf(stderr, "[+] .NET process detected — using diagnostic IPC "
+        if (syringe_verbose) fprintf(stderr, "[+] .NET process detected — using diagnostic IPC "
                 "(bypasses ptrace + anti-debug)\n");
         ret = syringe_inject_dotnet(pid, so_path);
     } else {
         ret = syringe_inject_with_retry(pid, so_path, retry_count, retry_delay_ms);
     }
-    restore_quiet_mode();
 
     return (ret == 0) ? 0 : 1;
 }

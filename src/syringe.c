@@ -71,13 +71,35 @@ size_t syringe_build_shellcode(unsigned char *buf, size_t bufsz,
 
 /* ── logging macros ─────────────────────────────────────────────────────── */
 
+/* ── Logging ──────────────────────────────────────────────────────────────
+ *
+ * INJ_LOG / INJ_OK: info messages, suppressed unless verbose mode.
+ * INJ_ERR: error messages, always printed.
+ *
+ * Verbose mode is controlled by the global `syringe_verbose` flag,
+ * set by the CLI via -v/--verbose, or by library callers directly.
+ * Default: 0 (silent — clean stderr for normal operation).
+ */
+int syringe_verbose = 0;
+
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
-#define INJ_LOG(fmt, ...) fprintf(stderr, "[*] " fmt "\n", ##__VA_ARGS__)
-#define INJ_OK(fmt, ...)  fprintf(stderr, "[+] " fmt "\n", ##__VA_ARGS__)
+#define INJ_LOG(fmt, ...) do { \
+    if (syringe_verbose) fprintf(stderr, "[*] " fmt "\n", ##__VA_ARGS__); \
+} while(0)
+#define INJ_OK(fmt, ...) do { \
+    if (syringe_verbose) fprintf(stderr, "[+] " fmt "\n", ##__VA_ARGS__); \
+} while(0)
+/* INJ_ERR always prints — but still uses [!] prefix for consistency.
+ * NOTE: INJ_ERR includes `return -1` — use INJ_ERR_PRINT for error logs
+ * that don't return (e.g., in void functions, or when you need custom
+ * return values). */
 #define INJ_ERR(fmt, ...) do {                                  \
     fprintf(stderr, "[!] " fmt "\n", ##__VA_ARGS__);            \
     return -1;                                                  \
+} while(0)
+#define INJ_ERR_PRINT(fmt, ...) do {                            \
+    fprintf(stderr, "[!] " fmt "\n", ##__VA_ARGS__);            \
 } while(0)
 #pragma GCC diagnostic pop
 
@@ -502,20 +524,20 @@ static unsigned long find_remote_sym(pid_t pid,
     }
     if (f) fclose(f);
     if (!lib_path[0]) {
-        fprintf(stderr, "[!] Cannot find '%s' in our maps\n", lib_substr);
+        INJ_ERR_PRINT("Cannot find '%s' in our maps\n", lib_substr);
         return 0;
     }
 
     /* resolve symbol offset in our process */
     void *h = dlopen(lib_path, RTLD_LAZY);
     if (!h) {
-        fprintf(stderr, "[!] dlopen '%s': %s\n", lib_path, dlerror());
+        INJ_ERR_PRINT("dlopen '%s': %s\n", lib_path, dlerror());
         return 0;
     }
 
     void *sym_addr = dlsym(h, sym);
     if (!sym_addr) {
-        fprintf(stderr, "[!] dlsym '%s': %s\n", sym, dlerror());
+        INJ_ERR_PRINT("dlsym '%s': %s\n", sym, dlerror());
         return 0;
     }
 
@@ -526,7 +548,7 @@ static unsigned long find_remote_sym(pid_t pid,
     /* find the same library in the target */
     MapEntry their_map = {0};
     if (!find_map(pid, lib_substr, "r", &their_map)) {
-        fprintf(stderr, "[!] '%s' not mapped in pid %d\n", lib_substr, pid);
+        INJ_ERR_PRINT("'%s' not mapped in pid %d\n", lib_substr, pid);
         return 0;
     }
 
@@ -817,18 +839,18 @@ static int syringe_inject_at(pid_t pid, const char *abs_path,
          * Restore state and detach — let the process continue.
          * The library constructor will run if dlopen completed.
          * Return -1 so the retry loop can try another region. */
-        fprintf(stderr, "[!] Thread %d stopped with signal %d (expected SIGTRAP) — "
+        INJ_ERR_PRINT("Thread %d stopped with signal %d (expected SIGTRAP) — "
                 "region 0x%lx (%s) failed\n",
                 inj_tid, WSTOPSIG(status), inject_addr,
                 region_name ? region_name : "?");
-        fprintf(stderr, "[!] Restoring state and detaching (library may still have loaded)\n");
+        INJ_ERR_PRINT("Restoring state and detaching (library may still have loaded)\n");
         rc = -1;
     } else if (WIFSIGNALED(status)) {
-        fprintf(stderr, "[!] Thread %d killed by signal %d\n", inj_tid, WTERMSIG(status));
+        INJ_ERR_PRINT("Thread %d killed by signal %d\n", inj_tid, WTERMSIG(status));
         free(all_tids);
         return -1;
     } else {
-        fprintf(stderr, "[!] Unexpected wait status: 0x%x\n", status);
+        INJ_ERR_PRINT("Unexpected wait status: 0x%x\n", status);
         rc = -1;
     }
 

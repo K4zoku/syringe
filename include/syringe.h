@@ -118,6 +118,13 @@ int syringe_inject_with_retry(pid_t pid, const char *so_path,
  */
 int syringe_inject_dotnet(pid_t pid, const char *so_path);
 
+/* ── Verbose logging control ──────────────────────────────────────────────
+ *
+ * Set to 1 to enable info logging (INJ_LOG/INJ_OK). Default: 0 (silent).
+ * The CLI sets this via -v/--verbose flag. Library callers can set directly.
+ */
+extern int syringe_verbose;
+
 #ifdef __cplusplus
 }
 #endif

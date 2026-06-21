@@ -65,9 +65,7 @@ static uint16_t get_u16le(const uint8_t *buf) {
     return (uint16_t)(buf[0] | (buf[1] << 8));
 }
 
-/* get_u32le only used if reading HRESULT from error response payload.
- * Kept for future use when we read the full response. */
-__attribute__((unused))
+/* get_u32le — used to read HRESULT from error response payload. */
 static uint32_t get_u32le(const uint8_t *buf) {
     return (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) |
            ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
@@ -215,11 +213,20 @@ static uint8_t *build_attach_profiler_msg(const char *profiler_path,
     return msg;
 }
 
-/* ── Send message + receive response ────────────────────────────────────── */
+/* ── Send message + receive full response ───────────────────────────────── */
 
+/*
+ * Send IPC message and receive full response (header + payload).
+ * Response is read into a caller-provided buffer. The response size is
+ * determined from the header's Size field (bytes 14-15).
+ *
+ * Returns 0 on success, -1 on error. On success, *out_len contains the
+ * total bytes read (header + payload).
+ */
 static int send_and_recv(const char *socket_path,
                           const uint8_t *msg, size_t msg_len,
-                          uint8_t *resp_hdr, size_t resp_hdr_size) {
+                          uint8_t *resp_buf, size_t resp_buf_size,
+                          size_t *out_len) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
         fprintf(stderr, "[dotnet] socket(): %s\n", strerror(errno));
@@ -229,7 +236,6 @@ static int send_and_recv(const char *socket_path,
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    /* Copy socket path, leave room for NUL terminator (sun_path is 108 bytes) */
     size_t path_len = strlen(socket_path);
     if (path_len >= sizeof(addr.sun_path)) {
         fprintf(stderr, "[dotnet] socket path too long: %s\n", socket_path);
@@ -256,12 +262,12 @@ static int send_and_recv(const char *socket_path,
         sent += n;
     }
 
-    /* Receive response header (20 bytes) */
+    /* Receive response header (20 bytes) first */
     ssize_t recvd = 0;
-    while ((size_t)recvd < resp_hdr_size) {
-        ssize_t n = read(fd, resp_hdr + recvd, resp_hdr_size - recvd);
+    while (recvd < 20) {
+        ssize_t n = read(fd, resp_buf + recvd, 20 - recvd);
         if (n < 0) {
-            fprintf(stderr, "[dotnet] read: %s\n", strerror(errno));
+            fprintf(stderr, "[dotnet] read header: %s\n", strerror(errno));
             close(fd);
             return -1;
         }
@@ -273,7 +279,27 @@ static int send_and_recv(const char *socket_path,
         recvd += n;
     }
 
+    /* Parse total response size from header */
+    uint16_t total_size = get_u16le(resp_buf + 14);
+    if (total_size < 20) total_size = 20;  /* sanity */
+    if (total_size > resp_buf_size) {
+        fprintf(stderr, "[dotnet] response too large: %u > %zu\n", total_size, resp_buf_size);
+        total_size = resp_buf_size;  /* truncate */
+    }
+
+    /* Read remaining payload (if any) */
+    while (recvd < total_size) {
+        ssize_t n = read(fd, resp_buf + recvd, total_size - recvd);
+        if (n < 0) {
+            fprintf(stderr, "[dotnet] read payload: %s\n", strerror(errno));
+            break;  /* we have at least the header */
+        }
+        if (n == 0) break;  /* server closed early */
+        recvd += n;
+    }
+
     close(fd);
+    *out_len = (size_t)recvd;
     return 0;
 }
 
@@ -309,22 +335,21 @@ int syringe_dotnet_attach_profiler(pid_t pid,
     fprintf(stderr, "[dotnet] Sending AttachProfiler (profiler=%s, %zu bytes client_data)\n",
             profiler_path, client_len);
 
-    /* Send + receive */
-    uint8_t resp[20];
-    int rc = send_and_recv(socket_path, msg, msg_len, resp, sizeof(resp));
+    /* Send + receive full response */
+    uint8_t resp[512];  /* large enough for header + error payload */
+    size_t resp_len = 0;
+    int rc = send_and_recv(socket_path, msg, msg_len, resp, sizeof(resp), &resp_len);
     free(msg);
     if (rc < 0) {
         return SYRINGE_DOTNET_ERROR;
     }
 
     /* Parse response */
-    /* Verify magic */
     if (memcmp(resp, "DOTNET_IPC_V1\0", 14) != 0) {
         fprintf(stderr, "[dotnet] Bad response magic\n");
         return SYRINGE_DOTNET_ERROR;
     }
 
-    uint16_t resp_size = get_u16le(resp + 14);
     uint8_t resp_cmd = resp[17];  /* CommandId */
 
     if (resp_cmd == 0x00) {
@@ -332,15 +357,42 @@ int syringe_dotnet_attach_profiler(pid_t pid,
         fprintf(stderr, "[dotnet] AttachProfiler OK — profiler .so loaded\n");
         return SYRINGE_DOTNET_OK;
     } else if (resp_cmd == 0xFF) {
-        /* Error — read HRESULT from payload (if any) */
+        /* Error — read HRESULT from payload (first 4 bytes after header) */
         uint32_t hresult = 0;
-        if (resp_size > 20) {
-            /* Need to read payload — but we only got 20 bytes so far.
-             * For simplicity, just report generic error. */
-            hresult = 0x8013136A;  /* ProfilerAlreadyActive guess */
+        if (resp_len > 24) {
+            hresult = get_u32le(resp + 20);  /* payload starts at offset 20 */
         }
         fprintf(stderr, "[dotnet] .NET rejected AttachProfiler (HRESULT=0x%08x)\n",
                 hresult);
+
+        /* Map common HRESULTs to readable messages */
+        if (hresult == 0x8013136A) {
+            fprintf(stderr, "[dotnet]   → CORPROF_E_PROFILER_ALREADY_ACTIVE: "
+                    "a profiler is already attached.\n");
+            fprintf(stderr, "[dotnet]     Restart the target process and try again.\n");
+        } else if (hresult == 0x80131385) {
+            fprintf(stderr, "[dotnet]   → Unknown command\n");
+        } else if (hresult == 0x80070057) {
+            fprintf(stderr, "[dotnet]   → Invalid argument (check profiler path/GUID)\n");
+        } else if (hresult == 0x80131515) {
+            fprintf(stderr, "[dotnet]   → Not supported\n");
+        }
+
+        /* If there's an error message string after HRESULT, print it */
+        if (resp_len > 28) {
+            uint32_t msg_len = get_u32le(resp + 24);
+            if (msg_len > 0 && 28 + msg_len * 2 <= resp_len) {
+                /* UTF-16LE error message — print as ASCII approximation */
+                fprintf(stderr, "[dotnet]   Error message: ");
+                for (uint32_t i = 0; i < msg_len && 28 + i * 2 < resp_len; i++) {
+                    char c = resp[28 + i * 2];
+                    if (c >= 32 && c < 127) fputc(c, stderr);
+                    else fputc('?', stderr);
+                }
+                fputc('\n', stderr);
+            }
+        }
+
         return SYRINGE_DOTNET_REJECTED;
     } else {
         fprintf(stderr, "[dotnet] Unexpected response CommandId=0x%02x\n", resp_cmd);

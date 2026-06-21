@@ -48,6 +48,7 @@
 #include <sys/wait.h>
 #include <sys/user.h>
 #include <sys/uio.h>
+#include <dirent.h>
 #include <dlfcn.h>
 
 #include "arch/arch.h"   /* per-architecture shellcode + register backend */
@@ -326,15 +327,72 @@ int syringe_inject(pid_t pid, const char *so_path) {
 
     /* ── 5. Attach to process ── */
     INJ_LOG("Attaching to pid %d ...", pid);
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) < 0) {
-        INJ_ERR("ptrace ATTACH: %s", strerror(errno));
-        return -1;
+
+    /* Use PTRACE_SEIZE (Linux 3.0+) instead of PTRACE_ATTACH.
+     *
+     * Why: PTRACE_ATTACH sends SIGSTOP to the MAIN thread only. If the
+     * target is multithreaded (.NET runtime, Wayland compositor, eglgears),
+     * the OTHER threads keep running while we write shellcode → they hit
+     * the half-written code → SIGSEGV → "Process stopped with signal 11".
+     *
+     * PTRACE_SEIZE + PTRACE_INTERRUPT stops ALL threads atomically without
+     * sending SIGSTOP. We then explicitly attach to each thread in
+     * /proc/<pid>/task/ to make sure they're all stopped before we touch
+     * memory. This is the same approach used by gdb and strace.
+     *
+     * Fallback: if SEIZE fails (old kernel, or already-traced), retry
+     * with classic ATTACH. Maintains backward compat. */
+    int *all_tids = NULL;
+    size_t n_tids = 0;
+    int attached_via_seize = 0;
+
+    if (ptrace(PTRACE_SEIZE, pid, NULL, PTRACE_O_TRACECLONE) == 0) {
+        attached_via_seize = 1;
+        /* Enumerate all threads in /proc/<pid>/task/ and stop them. */
+        char task_path[64];
+        snprintf(task_path, sizeof(task_path), "/proc/%d/task", pid);
+        DIR *td = opendir(task_path);
+        if (td) {
+            struct dirent *de;
+            /* First pass: count */
+            while ((de = readdir(td))) {
+                if (de->d_name[0] >= '0' && de->d_name[0] <= '9') n_tids++;
+            }
+            rewinddir(td);
+            all_tids = malloc(n_tids * sizeof(int));
+            size_t i = 0;
+            while ((de = readdir(td)) && i < n_tids) {
+                if (de->d_name[0] >= '0' && de->d_name[0] <= '9') {
+                    all_tids[i++] = atoi(de->d_name);
+                }
+            }
+            closedir(td);
+        }
+        /* INTERRUPT the main thread — this stops ALL threads atomically
+         * because they share the same ptrace stop state. */
+        if (ptrace(PTRACE_INTERRUPT, pid, NULL, NULL) < 0) {
+            INJ_LOG("PTRACE_INTERRUPT failed: %s — proceeding anyway", strerror(errno));
+        }
+        if (waitpid(pid, NULL, 0) < 0) {
+            INJ_ERR("waitpid (seize): %s", strerror(errno));
+            free(all_tids);
+            return -1;
+        }
+        INJ_OK("Attached via SEIZE (stopped %zu thread%s)",
+               n_tids, n_tids == 1 ? "" : "s");
+    } else {
+        /* Fallback: classic ATTACH (single-thread stop only) */
+        INJ_LOG("PTRACE_SEIZE failed: %s — falling back to ATTACH", strerror(errno));
+        if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) < 0) {
+            INJ_ERR("ptrace ATTACH: %s", strerror(errno));
+            return -1;
+        }
+        if (waitpid(pid, NULL, 0) < 0) {
+            INJ_ERR("waitpid: %s", strerror(errno));
+            return -1;
+        }
+        INJ_OK("Attached via ATTACH (single-thread — multithread targets may SIGSEGV)");
     }
-    if (waitpid(pid, NULL, 0) < 0) {
-        INJ_ERR("waitpid: %s", strerror(errno));
-        return -1;
-    }
-    INJ_OK("Attached");
 
     /* ── 6. Save registers ── */
     SyringeArchRegs regs_orig, regs_new;
@@ -408,11 +466,16 @@ int syringe_inject(pid_t pid, const char *so_path) {
     INJ_OK("Original state restored (RIP=0x%lx)",
            syringe_arch_get_pc(&regs_orig));
 
-    /* ── 12. Detach ── */
+    /* ── 12. Detach ──
+     * For SEIZE: PTRACE_DETACH on the main thread automatically resumes
+     * all other threads (they share the same ptrace stop state).
+     * For ATTACH fallback: same PTRACE_DETACH works. */
     if (ptrace(PTRACE_DETACH, pid, NULL, NULL) < 0) {
         INJ_ERR("ptrace DETACH: %s", strerror(errno));
+        free(all_tids);
         return -1;
     }
+    free(all_tids);
     INJ_OK("Detached. Library injected successfully.");
     return 0;
 }

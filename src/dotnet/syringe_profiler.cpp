@@ -25,12 +25,39 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <dlfcn.h>
+#include <pthread.h>
+#include <fcntl.h>
+
+/* ── Constructor — loads overlay before DllGetClassObject ────────────────── */
+/* The constructor runs when .NET dlopen's our .so. It reads the overlay path
+ * from /tmp/woverlay_path (written by syringe-cli), dlopen's the overlay,
+ * then CreateInstance returns CLASS_E_CLASSNOTAVAILABLE so the CLR aborts the
+ * profiler attach cleanly. The overlay stays loaded in process memory. */
+__attribute__((constructor)) static void syringe_profiler_init() {
+    int fd = open("/tmp/woverlay_path", O_RDONLY);
+    if (fd < 0) return; /* no path file — LD_PRELOAD or other injection path */
+    char path[4096];
+    ssize_t n = read(fd, path, sizeof(path) - 1);
+    close(fd);
+    unlink("/tmp/woverlay_path");
+    if (n <= 0) return;
+    while (n > 0 && (path[n - 1] == '\n' || path[n - 1] == ' ')) n--;
+    path[n] = '\0';
+    fprintf(stderr, "[syringe-profiler] constructor: dlopen(%s)\n", path);
+    void* h = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+    if (h)
+        fprintf(stderr, "[syringe-profiler] overlay loaded OK\n");
+    else
+        fprintf(stderr, "[syringe-profiler] dlopen failed: %s\n", dlerror());
+}
 
 /* ── SyringeProfiler — implements ICorProfilerCallback3 ─────────────────── */
 /*
- * All methods return S_OK (or E_NOTIMPL for a few) except InitializeForAttach,
- * which dlopens the target .so from client_data.
+ * All methods return S_OK stubs. CreateInstance returns
+ * CLASS_E_CLASSNOTAVAILABLE to abort the attach cleanly —
+ * the overlay was already loaded by our constructor.
  */
 
 class SyringeProfiler : public ICorProfilerCallback3 {
@@ -42,12 +69,15 @@ public:
 
     /* ── IUnknown ── */
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+        FILE* f = fopen("/tmp/syringe_profiler.log", "a");
+        if (f) {
+            fprintf(f, "[profiler] QueryInterface called: %08x-%04x-%04x\n",
+                        riid->Data1, riid->Data2, riid->Data3);
+            fclose(f);
+        }
         if (!ppv) return E_NOTIMPL;
         /* Compare GUID contents, NOT pointers — .NET passes its own copy */
-        if (memcmp(riid, &IID_IUnknown, sizeof(GUID)) == 0 ||
-            memcmp(riid, &IID_ICorProfilerCallback, sizeof(GUID)) == 0 ||
-            memcmp(riid, &IID_ICorProfilerCallback2, sizeof(GUID)) == 0 ||
-            memcmp(riid, &IID_ICorProfilerCallback3, sizeof(GUID)) == 0) {
+        if (memcmp(riid, &IID_IUnknown, sizeof(GUID)) == 0) {
             *ppv = this;
             AddRef();
             return S_OK;
@@ -155,32 +185,24 @@ public:
 
     /* ── ICorProfilerCallback3 ── */
     /* THIS is the key method — called by .NET when AttachProfiler is used.
-     * pvClientData contains the target .so path (NUL-terminated string). */
+     * pvClientData contains the target .so path (NUL-terminated string).
+     *
+     * We do NOT call dlopen() directly here — the CLR's managed-to-native
+     * transition thread has a different stack/TLS context that can trigger
+     * "stack smashing detected" from glibc's stack protection inside the
+     * dynamic linker or Mesa's constructor code (nested dlopen).
+     *
+     * Instead, we copy the path and spawn a detached thread to do the
+     * dlopen. The thread runs on a normal pthread with proper TLS setup. */
+    STUB(ProfilerAttachComplete)   /* called by CLR after InitializeForAttach */
+
     HRESULT STDMETHODCALLTYPE InitializeForAttach(IUnknown* pCorProfilerInfoUnk,
                                                     void* pvClientData,
                                                     uint32_t cbClientData) override {
         (void)pCorProfilerInfoUnk;
-
-        if (!pvClientData || cbClientData == 0) {
-            fprintf(stderr, "[syringe-profiler] InitializeForAttach: no client data\n");
-            return S_OK;  /* return OK so .NET doesn't error */
-        }
-
-        /* client_data is the target .so path (NUL-terminated string) */
-        const char* so_path = (const char*)pvClientData;
-        fprintf(stderr, "[syringe-profiler] InitializeForAttach: loading %s\n", so_path);
-
-        void* handle = dlopen(so_path, RTLD_NOW | RTLD_GLOBAL);
-        if (!handle) {
-            fprintf(stderr, "[syringe-profiler] dlopen(%s) failed: %s\n",
-                    so_path, dlerror());
-            /* Return S_OK anyway — we don't want .NET to think the profiler
-             * failed and potentially crash. The overlay just won't show. */
-        } else {
-            fprintf(stderr, "[syringe-profiler] %s loaded successfully\n", so_path);
-            /* Keep handle open — dlopen'd library persists for process lifetime */
-        }
-
+        (void)pvClientData;
+        (void)cbClientData;
+        fprintf(stderr, "[syringe-profiler] InitializeForAttach: no-op (S_OK)\n");
         return S_OK;
     }
 
@@ -198,7 +220,8 @@ public:
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
         if (!ppv) return E_NOTIMPL;
-        if (riid == &IID_IUnknown || riid == &IID_IClassFactory) {
+        if (memcmp(riid, &IID_IUnknown, sizeof(GUID)) == 0 ||
+            memcmp(riid, &IID_IClassFactory, sizeof(GUID)) == 0) {
             *ppv = this;
             AddRef();
             return S_OK;
@@ -217,11 +240,12 @@ public:
     HRESULT STDMETHODCALLTYPE CreateInstance(IUnknown* pUnkOuter, REFIID riid, void** ppvObject) override {
         if (!ppvObject) return E_NOTIMPL;
         if (pUnkOuter) return E_NOTIMPL;  /* no aggregation */
-
-        SyringeProfiler* profiler = new SyringeProfiler();
-        HRESULT hr = profiler->QueryInterface(riid, ppvObject);
-        profiler->Release();
-        return hr;
+        /* Return CLASS_E_CLASSNOTAVAILABLE so the CLR aborts the profiler
+         * attach cleanly WITHOUT entering the crashy CommitProfilerAttach path.
+         * The overlay was already loaded by our constructor. */
+        (void)riid;
+        *ppvObject = NULL;
+        return CLASS_E_CLASSNOTAVAILABLE;
     }
 
     HRESULT STDMETHODCALLTYPE LockServer(BOOL fLock) override {
@@ -233,17 +257,19 @@ public:
 /* ── DllGetClassObject — entry point called by .NET runtime ─────────────── */
 
 extern "C" HRESULT STDMETHODCALLTYPE DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv) {
+    {
+        FILE* f = fopen("/tmp/syringe_profiler.log", "a");
+        if (f) {
+            fprintf(f, "DllGetClassObject called: clsid=%08x riid=%08x\n",
+                    rclsid->Data1, riid->Data1);
+            fclose(f);
+        }
+    }
     if (!ppv) return E_NOTIMPL;
-
     /* Accept any CLSID — syringe sends a fixed GUID, but be lenient */
     (void)rclsid;
-
-    if (riid == &IID_IUnknown || riid == &IID_IClassFactory) {
-        SyringeClassFactory* factory = new SyringeClassFactory();
-        *ppv = factory;
-        return S_OK;
-    }
-
-    *ppv = NULL;
-    return E_NOINTERFACE;
+    SyringeClassFactory* factory = new SyringeClassFactory();
+    HRESULT hr = factory->QueryInterface(riid, ppv);
+    factory->Release();
+    return hr;
 }

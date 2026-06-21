@@ -370,6 +370,11 @@ int syringe_dotnet_attach_profiler(pid_t pid,
         if (resp_len >= 24) {
             hresult = get_u32le(resp + 20);  /* payload starts at offset 20 */
         }
+        if (hresult == 0x80040154) {
+            fprintf(stderr, "[dotnet] Injected OK\n");
+            return SYRINGE_DOTNET_OK;
+        }
+
         fprintf(stderr, "[dotnet] .NET rejected AttachProfiler (HRESULT=0x%08x)\n",
                 hresult);
 
@@ -422,6 +427,18 @@ int syringe_inject_dotnet(pid_t pid, const char *so_path) {
         return SYRINGE_DOTNET_ERROR;
     }
 
+    /* Write overlay path to /tmp/woverlay_path — the profiler's constructor
+     * reads this file and dlopen's the overlay before DllGetClassObject.
+     * This happens BEFORE the CLR's async attach commit, so we avoid the
+     * stack-smashing crash in .NET's CommitProfilerAttach. */
+    int wfd = open("/tmp/woverlay_path", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (wfd >= 0) {
+        write(wfd, abs_path, strlen(abs_path));
+        close(wfd);
+    } else {
+        fprintf(stderr, "[dotnet] Warning: cannot write /tmp/woverlay_path\n");
+    }
+
     /* Find syringe-dotnet-profiler.so — the COM profiler wrapper that
      * .NET will dlopen. It receives abs_path as client_data and dlopens it.
      *
@@ -434,7 +451,12 @@ int syringe_inject_dotnet(pid_t pid, const char *so_path) {
     char profiler_path[4096];
     const char* env = getenv("SYRINGE_PROFILER_PATH");
     if (env && env[0]) {
-        snprintf(profiler_path, sizeof(profiler_path), "%s", env);
+        /* Resolve to absolute — the CLR's dlopen runs in osu's process
+         * with potentially different CWD than our terminal. */
+        if (!realpath(env, profiler_path)) {
+            fprintf(stderr, "[dotnet] realpath('%s'): %s\n", env, strerror(errno));
+            return SYRINGE_DOTNET_ERROR;
+        }
     } else {
         /* Try same dir as target .so */
         const char* slash = strrchr(abs_path, '/');

@@ -43,6 +43,7 @@ typedef void*    LPVOID;
 #define S_FALSE     ((HRESULT)1)
 #define E_NOTIMPL   ((HRESULT)0x80004001)
 #define E_NOINTERFACE ((HRESULT)0x80004002)
+#define CLASS_E_CLASSNOTAVAILABLE ((HRESULT)0x80040154)
 
 typedef struct {
     uint32_t Data1;
@@ -66,16 +67,16 @@ static const IID IID_IClassFactory = {
     {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}
 };
 static const IID IID_ICorProfilerCallback = {
-    0x28488F18, 0xFB15, 0x4DA8,
-    {0xB1, 0xD9, 0x20, 0xD9, 0xC4, 0xC4, 0xF6, 0x58}
+    0x176FBED1, 0xA55C, 0x4796,
+    {0x98, 0xCA, 0xA9, 0xDA, 0x0E, 0xF8, 0x83, 0xE7}
 };
 static const IID IID_ICorProfilerCallback2 = {
     0x8A8CC829, 0xCCF2, 0x49FE,
-    {0xBB, 0xAE, 0x0F, 0x02, 0x2E, 0xE0, 0x71, 0x3E}
+    {0xBB, 0xAE, 0x0F, 0x02, 0x22, 0x28, 0x07, 0x1A}
 };
 static const IID IID_ICorProfilerCallback3 = {
-    0x4B8C1617, 0x0D84, 0x4120,
-    {0x8C, 0x30, 0x8F, 0xB6, 0xD2, 0xD5, 0x2E, 0x7D}
+    0x4FD2ED52, 0x7731, 0x4B8D,
+    {0x94, 0x69, 0x03, 0xD2, 0xCC, 0x30, 0x86, 0xC5}
 };
 
 /* CLSID for our profiler — must match what syringe sends in AttachProfiler */
@@ -185,9 +186,10 @@ interface ICorProfilerCallback2 : public ICorProfilerCallback {
     virtual HRESULT STDMETHODCALLTYPE HandleDestroyed(void* handleId) = 0;
 };
 
-/* ICorProfilerCallback3 — 1 method after ICorProfilerCallback2 */
+/* ICorProfilerCallback3 — 2 methods after ICorProfilerCallback2 */
 interface ICorProfilerCallback3 : public ICorProfilerCallback2 {
     virtual HRESULT STDMETHODCALLTYPE InitializeForAttach(IUnknown* pCorProfilerInfoUnk, void* pvClientData, uint32_t cbClientData) = 0;
+    virtual HRESULT STDMETHODCALLTYPE ProfilerAttachComplete() = 0;
 };
 
 #endif /* __cplusplus */

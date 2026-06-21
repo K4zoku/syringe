@@ -193,7 +193,7 @@ syringe_cli_exe = executable(
 syringe_profiler_lib = shared_library(
     'syringe-dotnet-profiler',
     ['src/dotnet/syringe_profiler.cpp'],
-    cpp_args: ['-Wall', '-Wextra', '-O2', '-fPIC', '-fno-exceptions', '-fno-rtti'],
+    cpp_args: ['-Wall', '-Wextra', '-O2', '-fPIC', '-fno-exceptions', '-fno-rtti', '-fno-stack-protector'],
     include_directories: inc,
     link_args: ['-ldl'],
     install: true,

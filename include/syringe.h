@@ -51,12 +51,38 @@ extern "C" {
  * address space. syringe_inject only loads the .so via dlopen — that's
  * enough for the constructor to fire.
  *
+ * This is equivalent to `syringe_inject_with_retry(pid, so_path, 1)` —
+ * tries only the first executable region (legacy behavior). Use
+ * syringe_inject_with_retry for multi-region retry on hard targets.
+ *
  * @param pid       Target process ID (must be ptrace-accessible)
  * @param so_path   Absolute or relative path to the .so file to inject.
  *                  Will be resolved to an absolute path via realpath().
  * @return          0 on success, -1 on failure (check errno or printed errors).
  */
 int syringe_inject(pid_t pid, const char *so_path);
+
+/**
+ * Inject a shared library with multi-region retry.
+ *
+ * Same as syringe_inject, but if the first executable region fails
+ * (SIGSEGV, EACCES, EAGAIN, etc.), tries the NEXT executable region
+ * from /proc/<pid>/maps. This handles targets where the default region
+ * is W^X-enforced, read-only, or otherwise unsuitable for shellcode.
+ *
+ * Regions are tried in /proc/<pid>/maps order (lowest address first),
+ * which typically means: main binary text → libc → ld-linux → other libs.
+ * The main binary is usually the safest to patch, so it's tried first.
+ *
+ * @param pid         Target process ID
+ * @param so_path     Path to the .so file (resolved via realpath)
+ * @param max_retries Maximum number of regions to try:
+ *                    - `> 0`: try at most max_retries regions
+ *                    - `0`:   try only the first region (same as syringe_inject)
+ *                    - `< 0`: try ALL executable regions (unlimited)
+ * @return            0 on success, -1 if all attempts failed
+ */
+int syringe_inject_with_retry(pid_t pid, const char *so_path, int max_retries);
 
 #ifdef __cplusplus
 }

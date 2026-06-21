@@ -35,10 +35,15 @@ static void print_usage(const char *prog) {
         "Usage:\n"
         "  %s [OPTIONS] <pid> <library.so>\n\n"
         "Options:\n"
-        "  -q, --quiet    Suppress all output except errors\n\n"
+        "  -q, --quiet       Suppress all output except errors\n"
+        "  -r, --retry N     Try up to N executable regions on failure\n"
+        "                    (default: 1 = first region only)\n"
+        "                    Use -1 or 'all' to try every region\n\n"
         "Examples:\n"
         "  syringe-cli 10024 ./liboverlay.so\n"
-        "  syringe-cli --quiet 10024 /usr/local/lib/libhook.so\n\n"
+        "  syringe-cli --quiet 10024 /usr/local/lib/libhook.so\n"
+        "  syringe-cli --retry all 10024 ./liboverlay.so   # try every region\n"
+        "  syringe-cli -r 5 10024 ./liboverlay.so          # try up to 5 regions\n\n"
         "Notes:\n"
         "  - Run as root, or with the same UID as the target process\n"
         "  - Requires ptrace_scope <= 1 "
@@ -52,6 +57,7 @@ static void print_usage(const char *prog) {
 
 /* ── quiet mode flag ───────────────────────────────────────────────────── */
 static int quiet_mode = 0;
+static int retry_count = 1;  /* default: try first region only */
 FILE *original_stderr = NULL;
 
 static void setup_quiet_mode(void) {
@@ -74,10 +80,23 @@ int main(int argc, char *argv[]) {
     while (arg_idx < argc) {
         if (strcmp(argv[arg_idx], "-q") == 0 || strcmp(argv[arg_idx], "--quiet") == 0) {
             quiet_mode = 1;
+            arg_idx++;
+        } else if (strcmp(argv[arg_idx], "-r") == 0 || strcmp(argv[arg_idx], "--retry") == 0) {
+            if (arg_idx + 1 >= argc) {
+                fprintf(stderr, "[!] --retry requires an argument (N or 'all')\n");
+                return 1;
+            }
+            const char *val = argv[arg_idx + 1];
+            if (strcmp(val, "all") == 0) {
+                retry_count = -1;  /* unlimited */
+            } else {
+                retry_count = atoi(val);
+                if (retry_count < -1) retry_count = -1;
+            }
+            arg_idx += 2;
         } else {
             break;
         }
-        arg_idx++;
     }
 
     if ((argc - arg_idx) != 2) {
@@ -103,7 +122,7 @@ int main(int argc, char *argv[]) {
     }
 
     setup_quiet_mode();
-    int ret = syringe_inject(pid, so_path);
+    int ret = syringe_inject_with_retry(pid, so_path, retry_count);
     restore_quiet_mode();
 
     return (ret == 0) ? 0 : 1;

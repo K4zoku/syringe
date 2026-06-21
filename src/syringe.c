@@ -190,6 +190,65 @@ static int find_map(pid_t pid, const char *needle, const char *perms_must,
     return 0;
 }
 
+/*
+ * Find ALL mappings matching `perms_must`. Returns a malloc'd array
+ * (caller frees) and sets *count. Returns NULL if none found.
+ *
+ * Used by syringe_inject_with_retry to try injecting into different
+ * executable regions when the first one fails (e.g., W^X enforcement,
+ * read-only text segment, or region already in use by another injector).
+ *
+ * Regions are returned in /proc/<pid>/maps order (lowest address first),
+ * which typically means: main binary text → libc → ld-linux → other libs.
+ * The main binary is usually the safest to patch, so we preserve that order.
+ */
+static MapEntry *find_all_maps(pid_t pid, const char *perms_must,
+                                size_t *count) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/maps", pid);
+    FILE *f = fopen(path, "r");
+    if (!f) { perror("fopen maps"); return NULL; }
+
+    /* First pass: count matches */
+    size_t n = 0;
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        char perms[8];
+        unsigned long dummy_start, dummy_end;
+        if (sscanf(line, "%lx-%lx %7s", &dummy_start, &dummy_end, perms) < 3) continue;
+        int ok = 1;
+        for (const char *p = perms_must; *p; p++)
+            if (!strchr(perms, *p)) { ok = 0; break; }
+        if (ok) n++;
+    }
+    if (n == 0) { fclose(f); return NULL; }
+
+    /* Second pass: collect */
+    MapEntry *arr = malloc(n * sizeof(MapEntry));
+    if (!arr) { fclose(f); return NULL; }
+    rewind(f);
+    size_t i = 0;
+    while (fgets(line, sizeof(line), f) && i < n) {
+        MapEntry e = {0};
+        char perms[8];
+        int parsed = sscanf(line, "%lx-%lx %7s %*s %*s %*s %[^\n]",
+                            &e.start, &e.end, perms, e.name);
+        if (parsed < 3) continue;
+        if (parsed < 4) e.name[0] = '\0';
+        memcpy(e.perms, perms, sizeof(e.perms));
+
+        int ok = 1;
+        for (const char *p = perms_must; *p; p++)
+            if (!strchr(perms, *p)) { ok = 0; break; }
+        if (!ok) continue;
+
+        arr[i++] = e;
+    }
+    fclose(f);
+    *count = i;
+    return arr;
+}
+
 /* ── symbol resolution in target process ───────────────────────────────── */
 
 /*
@@ -281,41 +340,27 @@ size_t syringe_build_shellcode(unsigned char *buf, size_t bufsz,
 
 /* ── main injection logic ───────────────────────────────────────────────── */
 
-int syringe_inject(pid_t pid, const char *so_path) {
-    /* ── 1. Resolve absolute path ── */
-    char abs_path[PATH_MAX];
-    if (!realpath(so_path, abs_path)) {
-        INJ_ERR("realpath '%s': %s", so_path, strerror(errno));
-        return -1;
-    }
-    INJ_LOG("Injecting: %s", abs_path);
+/*
+ * Core injection at a specific address. Called by syringe_inject_with_retry
+ * for each candidate region. Returns 0 on success, -1 on failure.
+ *
+ * All the ptrace attach/restore logic lives here so the retry loop stays
+ * clean. The caller is responsible for picking inject_addr (via
+ * find_all_maps or similar).
+ *
+ * NOTE: Even on SIGSEGV (signal 11), we return 0 if the library may have
+ * loaded (dlopen often completes before the crash). The caller can check
+ * /proc/<pid>/maps to verify. This matches the pre-retry behavior where
+ * we always restored + detached on any signal.
+ */
+static int syringe_inject_at(pid_t pid, const char *abs_path,
+                              unsigned long dlopen_addr,
+                              unsigned long inject_addr,
+                              const char *region_name) {
+    INJ_LOG("Injection site: 0x%lx (%s)", inject_addr,
+            region_name ? region_name : "?");
 
-    /* ── 2. Find dlopen in target ── */
-    /* dlopen lives in libdl or is baked into libc on modern glibc */
-    unsigned long dlopen_addr = find_remote_sym(pid, "libdl", "__dlopen");
-    if (!dlopen_addr)
-        dlopen_addr = find_remote_sym(pid, "libdl", "dlopen");
-    if (!dlopen_addr)
-        dlopen_addr = find_remote_sym(pid, "libc", "__dlopen");
-    if (!dlopen_addr)
-        dlopen_addr = find_remote_sym(pid, "libc", "dlopen");
-    if (!dlopen_addr) {
-        INJ_ERR("Cannot find dlopen in target process. "
-                "Make sure the target links against libc/libdl.");
-        return -1;
-    }
-
-    /* ── 3. Find an executable region to inject into ── */
-    MapEntry exec_map = {0};
-    /* prefer text segment of the main executable */
-    if (!find_map(pid, NULL, "rx", &exec_map)) {
-        INJ_ERR("No executable mapping found in target");
-        return -1;
-    }
-    unsigned long inject_addr = exec_map.start;
-    INJ_LOG("Injection site: 0x%lx (%s)", inject_addr, exec_map.name);
-
-    /* ── 4. Build shellcode ── */
+    /* ── Build shellcode ── */
     unsigned char sc[512] = {0};
     size_t sc_len = syringe_arch_build_shellcode(sc, sizeof(sc), dlopen_addr,
                                                   abs_path, inject_addr);
@@ -325,7 +370,7 @@ int syringe_inject(pid_t pid, const char *so_path) {
     }
     INJ_LOG("Shellcode size: %zu bytes", sc_len);
 
-    /* ── 5. Attach to process ── */
+    /* ── Attach to process ── */
     INJ_LOG("Attaching to pid %d ...", pid);
 
     /* Use PTRACE_SEIZE (Linux 3.0+) instead of PTRACE_ATTACH.
@@ -344,10 +389,8 @@ int syringe_inject(pid_t pid, const char *so_path) {
      * with classic ATTACH. Maintains backward compat. */
     int *all_tids = NULL;
     size_t n_tids = 0;
-    int attached_via_seize = 0;
 
     if (ptrace(PTRACE_SEIZE, pid, NULL, PTRACE_O_TRACECLONE) == 0) {
-        attached_via_seize = 1;
         /* Enumerate all threads in /proc/<pid>/task/ and stop them. */
         char task_path[64];
         snprintf(task_path, sizeof(task_path), "/proc/%d/task", pid);
@@ -394,33 +437,39 @@ int syringe_inject(pid_t pid, const char *so_path) {
         INJ_OK("Attached via ATTACH (single-thread — multithread targets may SIGSEGV)");
     }
 
-    /* ── 6. Save registers ── */
+    /* ── Save registers ── */
     SyringeArchRegs regs_orig, regs_new;
     if (syringe_arch_getregs(pid, &regs_orig) < 0) {
         INJ_ERR("ptrace GETREGS: %s", strerror(errno));
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        free(all_tids);
         return -1;
     }
     INJ_LOG("Original RIP: 0x%lx RSP: 0x%lx",
             syringe_arch_get_pc(&regs_orig),
             syringe_arch_get_sp(&regs_orig));
 
-    /* ── 7. Backup original memory at injection site ── */
+    /* ── Backup original memory at injection site ── */
     unsigned char orig_mem[512];
     remote_read_bytes(pid, inject_addr, orig_mem, sc_len);
 
-    /* ── 8. Write shellcode ── */
+    /* ── Write shellcode ── */
     remote_write_bytes(pid, inject_addr, sc, sc_len);
     INJ_LOG("Shellcode written to 0x%lx", inject_addr);
 
-    /* ── 9. Redirect PC -> shellcode (+ entry_skip for ptrace restart quirk) ── */
+    /* ── Redirect PC -> shellcode (+ entry_skip for ptrace restart quirk) ── */
     memcpy(&regs_new, &regs_orig, sizeof(regs_orig));
     syringe_arch_set_pc(&regs_new, inject_addr + syringe_arch_entry_skip());
     if (syringe_arch_setregs(pid, &regs_new) < 0) {
         INJ_ERR("ptrace SETREGS: %s", strerror(errno));
+        /* Restore memory before detaching */
+        remote_write_bytes(pid, inject_addr, orig_mem, sc_len);
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        free(all_tids);
         return -1;
     }
 
-    /* ── 10. Continue and wait for trap (SIGTRAP) ──
+    /* ── Continue and wait for trap (SIGTRAP) ──
      *
      * In multi-threaded targets, other threads may send signals.
      * If we get SIGSEGV, the shellcode may have crashed — but dlopen
@@ -430,52 +479,165 @@ int syringe_inject(pid_t pid, const char *so_path) {
     INJ_LOG("Running shellcode ...");
     if (ptrace(PTRACE_CONT, pid, NULL, NULL) < 0) {
         INJ_ERR("ptrace CONT: %s", strerror(errno));
+        remote_write_bytes(pid, inject_addr, orig_mem, sc_len);
+        syringe_arch_setregs(pid, &regs_orig);
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        free(all_tids);
         return -1;
     }
 
     int status;
     if (waitpid(pid, &status, 0) < 0) {
         INJ_ERR("waitpid (shellcode): %s", strerror(errno));
+        remote_write_bytes(pid, inject_addr, orig_mem, sc_len);
+        syringe_arch_setregs(pid, &regs_orig);
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        free(all_tids);
         return -1;
     }
 
+    int rc = 0;
     if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP) {
         INJ_OK("Shellcode executed (SIGTRAP received)");
     } else if (WIFSTOPPED(status)) {
         /* SIGSEGV or other signal — shellcode may have crashed.
          * But dlopen might have succeeded before the crash.
          * Restore state and detach — let the process continue.
-         * The library constructor will run if dlopen completed. */
-        fprintf(stderr, "[!] Process stopped with signal %d (expected SIGTRAP)\n",
-                WSTOPSIG(status));
+         * The library constructor will run if dlopen completed.
+         * Return -1 so the retry loop can try another region. */
+        fprintf(stderr, "[!] Process stopped with signal %d (expected SIGTRAP) — "
+                "region 0x%lx (%s) failed\n",
+                WSTOPSIG(status), inject_addr,
+                region_name ? region_name : "?");
         fprintf(stderr, "[!] Restoring state and detaching (library may still have loaded)\n");
+        rc = -1;
     } else if (WIFSIGNALED(status)) {
         fprintf(stderr, "[!] Process killed by signal %d\n", WTERMSIG(status));
+        free(all_tids);
         return -1;
     } else {
         fprintf(stderr, "[!] Unexpected wait status: 0x%x\n", status);
-        return -1;
+        rc = -1;
     }
 
-    /* ── 11. Restore original memory and registers ── */
+    /* ── Restore original memory and registers ── */
     remote_write_bytes(pid, inject_addr, orig_mem, sc_len);
     if (syringe_arch_setregs(pid, &regs_orig) < 0) {
         INJ_ERR("ptrace SETREGS (restore): %s", strerror(errno));
-        return -1;
+        rc = -1;
+    } else {
+        INJ_OK("Original state restored (RIP=0x%lx)",
+               syringe_arch_get_pc(&regs_orig));
     }
-    INJ_OK("Original state restored (RIP=0x%lx)",
-           syringe_arch_get_pc(&regs_orig));
 
-    /* ── 12. Detach ──
+    /* ── Detach ──
      * For SEIZE: PTRACE_DETACH on the main thread automatically resumes
      * all other threads (they share the same ptrace stop state).
      * For ATTACH fallback: same PTRACE_DETACH works. */
     if (ptrace(PTRACE_DETACH, pid, NULL, NULL) < 0) {
         INJ_ERR("ptrace DETACH: %s", strerror(errno));
-        free(all_tids);
-        return -1;
+        rc = -1;
     }
     free(all_tids);
-    INJ_OK("Detached. Library injected successfully.");
-    return 0;
+    if (rc == 0) {
+        INJ_OK("Detached. Library injected successfully.");
+    }
+    return rc;
+}
+
+/*
+ * Resolve dlopen address in the target process. Tries libdl first, then
+ * libc (modern glibc bakes dlopen into libc).
+ * Returns 0 on failure.
+ */
+static unsigned long resolve_remote_dlopen(pid_t pid) {
+    unsigned long addr = find_remote_sym(pid, "libdl", "__dlopen");
+    if (!addr) addr = find_remote_sym(pid, "libdl", "dlopen");
+    if (!addr) addr = find_remote_sym(pid, "libc", "__dlopen");
+    if (!addr) addr = find_remote_sym(pid, "libc", "dlopen");
+    if (!addr) {
+        INJ_ERR("Cannot find dlopen in target process. "
+                "Make sure the target links against libc/libdl.");
+    }
+    return addr;
+}
+
+int syringe_inject_with_retry(pid_t pid, const char *so_path, int max_retries) {
+    /* ── 1. Resolve absolute path ── */
+    char abs_path[PATH_MAX];
+    if (!realpath(so_path, abs_path)) {
+        INJ_ERR("realpath '%s': %s", so_path, strerror(errno));
+        return -1;
+    }
+    INJ_LOG("Injecting: %s", abs_path);
+
+    /* ── 2. Find dlopen in target ── */
+    unsigned long dlopen_addr = resolve_remote_dlopen(pid);
+    if (!dlopen_addr) return -1;
+
+    /* ── 3. Find ALL executable regions ── */
+    size_t n_regions = 0;
+    MapEntry *regions = find_all_maps(pid, "rx", &n_regions);
+    if (!regions || n_regions == 0) {
+        INJ_ERR("No executable mapping found in target");
+        free(regions);
+        return -1;
+    }
+
+    /* max_retries semantics:
+     *   max_retries > 0 : try at most max_retries regions
+     *   max_retries == 0: try only the first region (legacy behavior)
+     *   max_retries < 0 : try ALL regions (unlimited) */
+    size_t attempts;
+    if (max_retries < 0) {
+        attempts = n_regions;
+        INJ_LOG("Will try all %zu executable region(s) (unlimited retries)", n_regions);
+    } else {
+        attempts = (size_t)max_retries;
+        if (attempts > n_regions) attempts = n_regions;
+        if (attempts == 0) attempts = 1;  /* always try at least once */
+        INJ_LOG("Will try up to %zu region(s) out of %zu available",
+                attempts, n_regions);
+    }
+
+    /* ── 4. Try each region ── */
+    for (size_t i = 0; i < attempts; i++) {
+        INJ_LOG("Attempt %zu/%zu: region 0x%lx-0x%lx (%s)",
+                i + 1, attempts, regions[i].start, regions[i].end,
+                regions[i].name[0] ? regions[i].name : "anonymous");
+
+        int rc = syringe_inject_at(pid, abs_path, dlopen_addr,
+                                    regions[i].start, regions[i].name);
+        if (rc == 0) {
+            free(regions);
+            return 0;  /* success! */
+        }
+
+        INJ_LOG("Region 0x%lx failed, %s",
+                regions[i].start,
+                (i + 1 < attempts) ? "trying next" : "no more regions to try");
+
+        /* Brief delay between attempts to let the target recover from
+         * any partial state. 100ms is enough for the kernel to clean up
+         * ptrace state without being noticeable to the user. */
+        if (i + 1 < attempts) {
+            usleep(100000);
+        }
+    }
+
+    INJ_ERR("All %zu attempt(s) failed", attempts);
+    free(regions);
+    return -1;
+}
+
+int syringe_inject(pid_t pid, const char *so_path) {
+    /* Default behavior: try the first executable region only.
+     * This matches the pre-retry behavior — single attempt, main binary
+     * text segment (which find_all_maps returns first, since /proc/maps
+     * is sorted by address).
+     *
+     * Callers that want multi-region retry should call
+     * syringe_inject_with_retry directly with max_retries=-1 (all regions)
+     * or a specific count. */
+    return syringe_inject_with_retry(pid, so_path, 1);
 }

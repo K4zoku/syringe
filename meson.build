@@ -1,6 +1,6 @@
 project(
     'syringe',
-    'c',
+    ['c', 'cpp'],
     version: '0.6.0',
     default_options: [
         'warning_level=3',
@@ -180,6 +180,24 @@ syringe_cli_exe = executable(
     dependencies: [cap_lib],
     link_with: syringe_lib,
     install: true,
+)
+
+# ── syringe-dotnet-profiler.so (COM profiler for .NET diagnostic injection) ──
+#
+# This .so is loaded by .NET runtime via AttachProfiler IPC command.
+# It receives the target .so path as client_data in InitializeForAttach()
+# and dlopens it — effectively injecting any .so into a .NET process
+# WITHOUT ptrace (bypasses anti-debug).
+#
+# Must be C++ (COM vtables require C++ class layout).
+syringe_profiler_lib = shared_library(
+    'syringe-dotnet-profiler',
+    ['src/dotnet/syringe_profiler.cpp'],
+    cpp_args: ['-Wall', '-Wextra', '-O2', '-fPIC', '-fno-exceptions', '-fno-rtti'],
+    include_directories: inc,
+    link_args: ['-ldl'],
+    install: true,
+    install_dir: get_option('libdir'),
 )
 
 # ── Optional: set CAP_SYS_PTRACE on syringe-cli during install ────────────

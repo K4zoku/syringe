@@ -354,15 +354,52 @@ int syringe_inject_dotnet(pid_t pid, const char *so_path) {
         return SYRINGE_DOTNET_ERROR;
     }
 
-    /* For now, use so_path directly as the profiler path.
-     * In a full implementation, we'd use a syringe-profiler.so wrapper
-     * that receives so_path as client_data and dlopens it.
+    /* Resolve the target .so to absolute path — .NET runtime runs in a
+     * different process with potentially different CWD. */
+    char abs_path[4096];
+    if (!realpath(so_path, abs_path)) {
+        fprintf(stderr, "[dotnet] realpath('%s'): %s\n", so_path, strerror(errno));
+        return SYRINGE_DOTNET_ERROR;
+    }
+
+    /* Find syringe-dotnet-profiler.so — the COM profiler wrapper that
+     * .NET will dlopen. It receives abs_path as client_data and dlopens it.
      *
-     * But .NET requires the profiler to export DllGetClassObject (COM).
-     * A regular .so won't work. For now, just pass so_path as both
-     * profiler_path and client_data — if so_path happens to be a valid
-     * COM profiler, it works. Otherwise, user needs to build a wrapper.
-     *
-     * TODO: ship syringe-dotnet-profiler.so that wraps any .so. */
-    return syringe_dotnet_attach_profiler(pid, so_path, NULL, 0);
+     * Search order:
+     * 1. SYRINGE_PROFILER_PATH env var (for testing/dev)
+     * 2. Same directory as the target .so (common case: both in build/)
+     * 3. /usr/local/lib/syringe-dotnet-profiler.so (installed)
+     * 4. /usr/lib/syringe-dotnet-profiler.so (distro install)
+     */
+    char profiler_path[4096];
+    const char* env = getenv("SYRINGE_PROFILER_PATH");
+    if (env && env[0]) {
+        snprintf(profiler_path, sizeof(profiler_path), "%s", env);
+    } else {
+        /* Try same dir as target .so */
+        const char* slash = strrchr(abs_path, '/');
+        if (slash) {
+            size_t dir_len = (size_t)(slash - abs_path);
+            snprintf(profiler_path, sizeof(profiler_path), "%.*s/syringe-dotnet-profiler.so",
+                     (int)dir_len, abs_path);
+        } else {
+            snprintf(profiler_path, sizeof(profiler_path),
+                     "./syringe-dotnet-profiler.so");
+        }
+
+        /* Check if exists, else try installed paths */
+        if (access(profiler_path, F_OK) != 0) {
+            snprintf(profiler_path, sizeof(profiler_path),
+                     "/usr/local/lib/syringe-dotnet-profiler.so");
+            if (access(profiler_path, F_OK) != 0) {
+                snprintf(profiler_path, sizeof(profiler_path),
+                         "/usr/lib/syringe-dotnet-profiler.so");
+            }
+        }
+    }
+
+    /* Pass the target .so path as client_data (additionalData).
+     * The profiler's InitializeForAttach() will dlopen(abs_path). */
+    size_t client_len = strlen(abs_path) + 1;  /* include NUL */
+    return syringe_dotnet_attach_profiler(pid, profiler_path, abs_path, client_len);
 }

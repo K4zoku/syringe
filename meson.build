@@ -6,7 +6,7 @@ project(
         'warning_level=3',
         'c_std=gnu11',
     ],
-    meson_version: '>= 1.0.0',
+    meson_version: '>= 1.1.0',
 )
 
 # ── compiler & linker setup ───────────────────────────────────────────────
@@ -124,7 +124,7 @@ endif
 #
 # The GOT/PLT hooker (syringe_hook.h) is HEADER-ONLY — no separate .so
 # to link. Consumers just #include "syringe_hook.h" from one .c file.
-syringe_lib_sources = ['src/syringe.c', arch_src]
+syringe_lib_sources = ['src/syringe.c', arch_src, 'src/dotnet/dotnet_diagnostic.c']
 if host_arch == 'x86_64'
   syringe_lib_sources += shellcode_h
 endif
@@ -157,6 +157,12 @@ install_headers(
      'include/hook/arch/syringe_hook_x86_64.h',
      'include/hook/arch/syringe_hook_aarch64.h'],
     subdir: 'syringe/hook/arch',
+)
+
+# Install .NET diagnostic header
+install_headers(
+    ['include/dotnet/dotnet_diagnostic.h'],
+    subdir: 'syringe/dotnet',
 )
 
 # ── syringe-cli (CLI binary — links only libsyringe)

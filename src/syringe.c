@@ -55,6 +55,7 @@
 #include <dlfcn.h>
 
 #include "arch/arch.h"   /* per-architecture shellcode + register backend */
+#include "dotnet/dotnet_diagnostic.h"  /* .NET diagnostic IPC (no-ptrace injection) */
 
 /* ── internal prototype (not in public header) ────────────────────────────
  *
@@ -962,10 +963,21 @@ int syringe_inject_with_retry(pid_t pid, const char *so_path,
 }
 
 int syringe_inject(pid_t pid, const char *so_path) {
-    /* Default behavior: try up to 3 regions with 100ms delay between
-     * attempts. This handles most cases without the 66s+ hang of
-     * unlimited retries on apps with many regions (e.g., osu! AppImage
-     * has 666 executable regions).
+    /* Auto-detect: if target has a .NET diagnostic socket, use that path
+     * (bypasses ptrace + anti-debug). Otherwise, use ptrace with retry.
+     *
+     * .NET diagnostic socket: /tmp/dotnet-diagnostic-{pid}-*-socket
+     * If present, target is a .NET process with diagnostics enabled.
+     * Using syringe_inject_dotnet avoids EPERM from .NET anti-debug. */
+    char dotnet_socket[128];
+    if (syringe_dotnet_find_socket(pid, dotnet_socket, sizeof(dotnet_socket)) == 0) {
+        INJ_LOG("Detected .NET diagnostic socket — using diagnostic IPC "
+                "(bypasses ptrace + anti-debug)");
+        return syringe_inject_dotnet(pid, so_path);
+    }
+
+    /* Default: ptrace path — try up to 3 regions with 100ms delay.
+     * This handles most cases without the 66s+ hang of unlimited retries.
      *
      * The thread-wait logic in syringe_inject_at handles the common
      * "all threads in syscall" case by waiting up to 1s for a thread to

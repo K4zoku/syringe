@@ -96,6 +96,28 @@ int syringe_inject(pid_t pid, const char *so_path);
 int syringe_inject_with_retry(pid_t pid, const char *so_path,
                                int max_retries, int retry_delay_ms);
 
+/**
+ * Inject a shared library into a running .NET process via diagnostic IPC.
+ *
+ * Uses the .NET CoreCLR Diagnostic Server (not ptrace) to attach a profiler
+ * .so. This bypasses anti-debug techniques that block ptrace:
+ *   - prctl(PR_SET_DUMPABLE, 0)
+ *   - seccomp filters on ptrace
+ *   - .NET runtime anti-debug
+ *
+ * Works on .NET Core 3.0+ and .NET 5+. Target must have diagnostics enabled
+ * (default; disabled via DOTNET_EnableDiagnostics=0 env var).
+ *
+ * @param pid     Target .NET process ID
+ * @param so_path Path to the library to inject
+ * @return        0 on success, -1 on failure
+ *
+ * Note: the .so must be a valid .NET COM profiler (export DllGetClassObject
+ * and implement ICorProfilerCallback). For regular .so injection, use the
+ * syringe-dotnet-profiler.so wrapper (TODO: not yet implemented).
+ */
+int syringe_inject_dotnet(pid_t pid, const char *so_path);
+
 #ifdef __cplusplus
 }
 #endif

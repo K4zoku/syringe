@@ -44,7 +44,7 @@ sudo ldconfig
 
 | File | What's in it |
 |------|-------------|
-| [docs/USAGE.md](docs/USAGE.md) | All four usage patterns (CLI inject, C inject, write a `.so`, app self-hook) + meson subproject integration |
+| [docs/USAGE.md](docs/USAGE.md) | Injecting (CLI + C), hooking (injectable `.so` + self-hook), Meson integration (system install, subproject, wrap) |
 | [docs/API.md](docs/API.md) | `libsyringe` and `syringe_hook` API reference, configuration macros |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System diagram, platform support matrix, aarch64 specifics, design rationale |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Build, test, cross-compile for aarch64, ptrace privileges |

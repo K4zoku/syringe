@@ -18,8 +18,6 @@
  *
  * Build: compiled as C++ (COM vtables require C++ class layout)
  */
-
-/* _GNU_SOURCE is defined by meson (-D_GNU_SOURCE), don't redefine */
 #include "dotnet/corprof_min.h"
 
 #include <stdio.h>
@@ -29,28 +27,99 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <fcntl.h>
+#include <sys/file.h>
+#include <stdarg.h>
+
+/* ── Logger (matches syringe_hook convention: SYRINGE_HOOK_DEBUG env) ────── */
+
+static void profiler_log_real(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fflush(stderr);
+}
+
+static void profiler_log_nop(const char *fmt, ...) { (void)fmt; }
+
+static void (*profiler_log_fn)(const char *fmt, ...) = profiler_log_nop;
+static int profiler_log_ready = 0;
+
+static void profiler_log_init(void) {
+    profiler_log_ready = 1;
+    const char *e = getenv("SYRINGE_HOOK_DEBUG");
+    if (e && e[0])
+        profiler_log_fn = profiler_log_real;
+}
+
+#define PROFILER_LOG(fmt, ...) do {                                  \
+    if (!profiler_log_ready) profiler_log_init();                     \
+    profiler_log_fn("[syringe_profiler] " fmt "\n", ##__VA_ARGS__);    \
+} while (0)
+
+/* ── Claim our path from /tmp/syringe_inject ────────────────────────────────
+ * Reads entries ("<pid> <path>\n"), consumes the one matching our pid,
+ * writes back the rest so other processes can claim theirs. */
+static int syringe_profiler_claim_path(char *path, size_t path_sz) {
+    pid_t my_pid = getpid();
+    char pid_str[16];
+    int pid_len = snprintf(pid_str, sizeof(pid_str), "%d", (int)my_pid);
+
+    int fd = open("/tmp/syringe_inject", O_RDWR | O_CREAT, 0644);
+    if (fd < 0) return -1;
+    flock(fd, LOCK_EX);
+
+    char buf[65536];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    if (n <= 0) { flock(fd, LOCK_UN); close(fd); return -1; }
+    buf[n] = '\0';
+
+    char remaining[65536];
+    size_t rem = 0;
+    int found = 0;
+
+    char *p = buf;
+    while (p < buf + n) {
+        char *nl = strchr(p, '\n');
+        if (!nl) break;
+        size_t entry_len = nl - p + 1;
+
+        if (!found && (int)entry_len > pid_len + 1 && p[pid_len] == ' ' &&
+            strncmp(p, pid_str, pid_len) == 0) {
+            size_t path_len = entry_len - pid_len - 2;
+            if (path_len > 0 && path_len < path_sz) {
+                memcpy(path, p + pid_len + 1, path_len);
+                path[path_len] = '\0';
+                found = 1;
+            }
+        } else if (rem + entry_len <= sizeof(remaining)) {
+            memcpy(remaining + rem, p, entry_len);
+            rem += entry_len;
+        }
+        p = nl + 1;
+    }
+
+    if (rem > 0) {
+        ftruncate(fd, 0);
+        lseek(fd, 0, SEEK_SET);
+        write(fd, remaining, rem);
+    }
+    flock(fd, LOCK_UN);
+    close(fd);
+    return found ? 0 : -1;
+}
 
 /* ── Constructor — loads overlay before DllGetClassObject ────────────────── */
-/* The constructor runs when .NET dlopen's our .so. It reads the overlay path
- * from /tmp/woverlay_path (written by syringe-cli), dlopen's the overlay,
- * then CreateInstance returns CLASS_E_CLASSNOTAVAILABLE so the CLR aborts the
- * profiler attach cleanly. The overlay stays loaded in process memory. */
 __attribute__((constructor)) static void syringe_profiler_init() {
-    int fd = open("/tmp/woverlay_path", O_RDONLY);
-    if (fd < 0) return; /* no path file — LD_PRELOAD or other injection path */
     char path[4096];
-    ssize_t n = read(fd, path, sizeof(path) - 1);
-    close(fd);
-    unlink("/tmp/woverlay_path");
-    if (n <= 0) return;
-    while (n > 0 && (path[n - 1] == '\n' || path[n - 1] == ' ')) n--;
-    path[n] = '\0';
-    fprintf(stderr, "[syringe-profiler] constructor: dlopen(%s)\n", path);
+    if (syringe_profiler_claim_path(path, sizeof(path)) < 0) return;
+
+    PROFILER_LOG("dlopen(%s)", path);
     void* h = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
     if (h)
-        fprintf(stderr, "[syringe-profiler] overlay loaded OK\n");
+        PROFILER_LOG("library loaded OK");
     else
-        fprintf(stderr, "[syringe-profiler] dlopen failed: %s\n", dlerror());
+        PROFILER_LOG("dlopen failed: %s", dlerror());
 }
 
 /* ── SyringeProfiler — implements ICorProfilerCallback3 ─────────────────── */
@@ -73,14 +142,7 @@ public:
 
     /* ── IUnknown ── */
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
-        FILE* f = fopen("/tmp/syringe_profiler.log", "a");
-        if (f) {
-            fprintf(f, "[profiler] QueryInterface called: %08x-%04x-%04x\n",
-                        riid->Data1, riid->Data2, riid->Data3);
-            fclose(f);
-        }
         if (!ppv) return E_NOTIMPL;
-        /* Compare GUID contents, NOT pointers — .NET passes its own copy */
         if (memcmp(riid, &IID_IUnknown, sizeof(GUID)) == 0) {
             *ppv = this;
             AddRef();
@@ -206,7 +268,7 @@ public:
         (void)pCorProfilerInfoUnk;
         (void)pvClientData;
         (void)cbClientData;
-        fprintf(stderr, "[syringe-profiler] InitializeForAttach: no-op (S_OK)\n");
+        PROFILER_LOG("InitializeForAttach: no-op (S_OK)");
         return S_OK;
     }
 
@@ -264,14 +326,6 @@ public:
 /* ── DllGetClassObject — entry point called by .NET runtime ─────────────── */
 
 extern "C" HRESULT STDMETHODCALLTYPE DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv) {
-    {
-        FILE* f = fopen("/tmp/syringe_profiler.log", "a");
-        if (f) {
-            fprintf(f, "DllGetClassObject called: clsid=%08x riid=%08x\n",
-                    rclsid->Data1, riid->Data1);
-            fclose(f);
-        }
-    }
     if (!ppv) return E_NOTIMPL;
     /* Accept any CLSID — syringe sends a fixed GUID, but be lenient */
     (void)rclsid;

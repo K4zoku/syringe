@@ -46,20 +46,20 @@ The standard injection path uses `ptrace(2)` to:
 ```
 Injector (ptrace + shellcode)        Target process memory
 ─────────────────────────            ───────────────────────
-                                   ┌────────────────────┐
+                                    ┌────────────────────┐
    syringe_inject()                 │  Target process    │
      ├─ ptrace_attach(pid) ────────►│                    │
      ├─ read /proc/pid/maps         │  ...               │
      ├─ find dlopen() addr          │  ...               │
      ├─ write shellcode at addr     │  [shellcode]       │
-     ├─ save registers              │   dlopen(path,    │
+     ├─ save registers              │   dlopen(path,     │
      ├─ JMP RIP → shellcode         │    RTLD_NOW)       │
      ├─ PTRACE_CONT (run)           │   ↓                │
      ├─ wait(dlopen returns)        │   .so loaded       │
      ├─ restore registers           │   __constructor    │
      └─ ptrace_detach               │   ↓                │
-                                   │   syringe_hook_*   │
-                                   └────────────────────┘
+                                    │   syringe_hook_*   │
+                                    └────────────────────┘
 ```
 
 ## .NET CoreCLR injection flow (AttachProfiler)
@@ -80,18 +80,18 @@ Injector (AttachProfiler IPC)       .NET process (CoreCLR)
 ───────────────────────────         ──────────────────────
                                    ┌────────────────────┐
    syringe_inject_dotnet(pid)      │  .NET runtime      │
-     ├─ find socket path            │  ┌──────────────┐  │
-     ├─ connect AF_UNIX             │  │ profiler .so │  │
-     ├─ send Binary IPC v1          │  │ (Attach      │  │
+     ├─ find socket path           │  ┌──────────────┐  │
+     ├─ connect AF_UNIX            │  │ profiler .so │  │
+     ├─ send Binary IPC v1         │  │ (Attach      │  │
      ├─ runtime loads              │  │  Profiler)   │  │
      │   libsyringe-dotnet-        │  └──────┬───────┘  │
      │   profiler.so               │         │          │
-     ├─ profiler dlopen(target) ──►│  __constructor    │
-     │   (requested .so)           │   ↓               │
-     │                             │  dlopen(...)      │
-     │                             │   (target .so)    │
-     │                             └────────┬──────────┘
-     │                                      ↓
+     ├─ profiler dlopen(target) ──►│  __constructor     │
+     │   (requested .so)           │   ↓                │
+     │                             │  dlopen(...)       │
+     │                             │   (target .so)     │
+     │                             └─────────┬──────────┘
+     │                                       ↓
      │                               Target app hooks
 ```
 

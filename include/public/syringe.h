@@ -1,29 +1,19 @@
-/*
- * syringe.h — Public API for syringe (cross-process injection)
+/**
+ * syringe.h — Cross-process injection API
  *
- *   SYRINGE Yields Runtime Injected Native Global Executables
- *
- * syringe is a ptrace-based shared-library injector for x86-64 Linux.
- * This header exposes the cross-process injection surface ONLY.
- *
- *   - syringe_inject(pid, so_path)
- *       ptrace-attach a target process, write a small shellcode stub
- *       into its text segment, redirect RIP, run dlopen(), trap, restore.
- *
- * The in-process GOT/PLT hooking surface lives in a SEPARATE library
- * (libsyringe_hook.so) and a SEPARATE header (syringe_hook.h). Typical
- * workflow: use libsyringe.so to inject a .so into a target process;
- * that .so then links libsyringe_hook.so (or copies syringe_hook.c
- * statically) and calls syringe_hook_install() in its constructor to
- * patch the target's GOT.
+ * Ptrace-based shared-library injector for Linux. Injects a .so into a
+ * running process by: ptrace-attach → find dlopen() → write shellcode
+ * stub into text segment → redirect RIP → run → restore.
  *
  * Usage:
- *   #define _GNU_SOURCE   // before any system header
+ *   #define _GNU_SOURCE
  *   #include "syringe.h"
  *   int rc = syringe_inject(1234, "/path/to/library.so");
  *
- * syringe does NOT require root, but the caller must have ptrace access
- * to the target (same UID, or ptrace_scope <= 1).
+ * Does NOT require root, but the caller must have ptrace access to the
+ * target (same UID, or ptrace_scope <= 1).
+ *
+ * The in-process hooker is header-only — see syringe_hook.h.
  */
 
 #ifndef SYRINGE_H

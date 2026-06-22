@@ -170,10 +170,10 @@ static inline uint8_t *syringe_dotnet_build_attach_msg(const char *profiler_path
     p += 4;
 
     static const uint8_t guid[16] = {
-        0x78, 0x56, 0x34, 0x12,
-        0x34, 0x12,
-        0x34, 0x12,
-        0x12, 0x34, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc
+        0xb5, 0x6c, 0x1c, 0x0c,
+        0xc9, 0x3a,
+        0x38, 0x43,
+        0x8e, 0x16, 0x42, 0xa0, 0xdc, 0x8b, 0x34, 0xf1
     };
     memcpy(p, guid, 16);
     p += 16;
@@ -425,9 +425,11 @@ static inline int syringe_inject_dotnet(pid_t pid, const char *so_path) {
         }
     }
 
-    int wfd = open("/tmp/woverlay_path", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    char entry[4112];
+    int elen = snprintf(entry, sizeof(entry), "%d %s\n", pid, abs_path);
+    int wfd = open("/tmp/syringe_inject", O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (wfd >= 0) {
-        write(wfd, abs_path, strlen(abs_path));
+        write(wfd, entry, elen);
         close(wfd);
     }
 

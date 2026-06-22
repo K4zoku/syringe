@@ -1,34 +1,16 @@
-/*
- * syringe.c — Core logic for injecting a shared library into a running process
+/**
+ * syringe.c — ptrace-based shared-library injector
  *
- *   SYRINGE Yields Runtime Injected Native Global Executables
+ * Technique (see syringe.h for details):
+ *   ptrace-attach → find dlopen() → write shellcode stub → redirect RIP → run → restore
  *
- * Technique:
- *   1. Attach to target process with ptrace
- *   2. Find dlopen() address in the target (via /proc/<pid>/maps + symbol lookup)
- *   3. Write a shellcode stub that calls dlopen(path, RTLD_NOW|RTLD_GLOBAL)
- *   4. Redirect RIP to shellcode, let it run, then restore original state
+ * Arch-agnostic core. Per-CPU backends live in src/arch/arch_<arch>.c.
  *
- * This file is the arch-agnostic core. Everything that depends on the target
- * CPU — shellcode emission, register layout, PC fixup, entry-skip — is routed
- * through the per-architecture backend in src/arch/arch_<arch>.c (see
- * src/arch/arch.h). Adding a new architecture only requires a new arch .c
- * file; this file does not change.
+ * Public API (syringe.h): syringe_inject()
+ * Internal escape hatch:  syringe_build_shellcode() (exposed for unit tests)
  *
- * Public API (declared in syringe.h):
- *   syringe_inject(pid_t pid, const char *so_path) -> 0 on success, -1 on failure
- *
- * Internal helper (file-scope prototype — NOT in syringe.h, intentionally
- * kept out of the public surface; tests reach it via extern):
- *   syringe_build_shellcode(buf, bufsz, dlopen_addr, so_path, inject_addr)
- *     -> shellcode size in bytes, or 0 on overflow
- *   This is now a thin escape-hatch wrapper around the arch backend's
- *   syringe_arch_build_shellcode(); it exists purely so existing callers
- *   (unit tests via extern, advanced consumers) keep resolving the symbol.
- *
- * The in-process GOT/PLT hooking surface (syringe_hook_install, etc.) lives
- * in a SEPARATE library: libsyringe_hook.so. See syringe_hook.h. libsyringe.so
- * does NOT link against libsyringe_hook.so — they are independent surfaces.
+ * The in-process hooker (syringe_hook_install etc.) is header-only —
+ * see syringe_hook.h. libsyringe.so does NOT link against it.
  */
 
 #define _GNU_SOURCE

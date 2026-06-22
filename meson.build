@@ -112,18 +112,7 @@ endif
 #  TARGETS
 # ══════════════════════════════════════════════════════════════════════════
 
-# ── libsyringe.so — cross-process injection surface ───────────────────────
-#
-#   SYRINGE Yields Runtime Injected Native Global Executables
-#
-# Public API (syringe.h):
-#   - syringe_inject(pid, so_path)   — ptrace + dlopen inject
-#
-# Internal (NOT in header, file-scope prototype in syringe.c):
-#   - syringe_build_shellcode(...)   — escape hatch for advanced users
-#
-# The GOT/PLT hooker (syringe_hook.h) is HEADER-ONLY — no separate .so
-# to link. Consumers just #include "syringe_hook.h" from one .c file.
+# ── libsyringe.so — cross-process injection surface
 syringe_lib_sources = ['src/syringe.c', arch_src]
 if host_arch == 'x86_64'
   syringe_lib_sources += shellcode_h

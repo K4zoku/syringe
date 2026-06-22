@@ -1,146 +1,26 @@
-/*
+/**
  * syringe_hook.h — Header-only in-process GOT/PLT + inline hooker
  *
- *   SYRINGE Yields Runtime Injected Native Global Executables
+ * #include this from exactly one .c file per .so. All functions are
+ * static inline; each TU gets its own private hook registry.
  *
- * ─────────────────────────────────────────────────────────────────────────
- *  OVERVIEW
- * ─────────────────────────────────────────────────────────────────────────
+ * Hook strategies (tried in order):
+ *   1. GOT/PLT patch — overwrites GOT entries in every loaded module.
+ *   2. Inline trampoline — overwrites function prologue with JMP to hook.
+ *   3. dlsym fallback — stores dlsym address when no GOT importers found.
  *
- * This is a HEADER-ONLY library. There is no libsyringe_hook.so to link
- * against — just #include this header from ONE .c file in your project
- * and call the API. All functions are marked `static inline` so each
- * translation unit gets its own private copy of the hook registry.
+ * Configuration (define BEFORE #include):
+ *   SYRINGE_HOOK_MAX=N      Registry capacity (default: 32)
+ *   SYRINGE_HOOK_NO_HELPERS Strip remove/count/is_installed to debloat
+ *   SYRINGE_HOOK_QUIET      Disable log output
  *
- * Three hooking strategies are tried in order:
+ * Architecture support: x86-64 and aarch64 have full disasm+trampoline.
+ * arm32/riscv64 fall back to GOT-only patching.
  *
- *  1. GOT/PLT patch  — overwrite GOT entries in every loaded module.
- *                      Catches all cross-library calls.
- *                      Handles Full-RELRO via mprotect, with /proc/self/mem
- *                      as a fallback when mprotect is blocked (SELinux/seccomp).
- *                      Force-resolves lazy PLT stubs before reading orig_addr.
- *                      Handles both RELA (.rela.plt/.rela.dyn) and REL sections.
- *
- *  2. Inline trampoline — overwrites the first TRAMP_JMP_SZ bytes of the
- *                         target function with a JMP to the hook.
- *                         Catches intra-library calls (e.g. libEGL calling
- *                         itself, or SDL calling through a dlsym'd pointer).
- *                         Original prologue bytes are saved + a bounce stub
- *                         is allocated so orig() can still be called.
- *                         Uses a length-disassembler to avoid splitting
- *                         instructions, and patches PC-relative disps.
- *
- *  3. dlsym fallback   — when GOT walk finds zero entries (symbol present but
- *                         no importers), stores dlsym address as orig so the
- *                         hook can at least be wired up via trampoline.
- *
- * NOTE: syringe_hook_* operates on the CALLING process, not a remote process.
- * To hook a target process, inject a .so whose __attribute__((constructor))
- * calls syringe_hook_install() — that .so will run inside the target.
- *
- * ─────────────────────────────────────────────────────────────────────────
- *  PUBLIC API
- * ─────────────────────────────────────────────────────────────────────────
- *
- *  Installation:
- *    int syringe_hook_install(sym, hook, &orig)
- *        Hook by symbol name (GOT + inline trampoline). Returns patch count.
- *
- *    int syringe_hook_install_addr(sym, target, hook, &orig)
- *        Hook by explicit address (inline only, bypass GOT). Returns 1/0.
- *        Use when symbol is loaded via dlopen and not in your PLT.
- *
- *  Removal:
- *    int  syringe_hook_remove(sym)         Remove one hook. Returns patches removed.
- *    void syringe_hook_remove_all()        Remove all installed hooks.
- *
- *  Query:
- *    int  syringe_hook_count()             Current hook count.
- *    int  syringe_hook_is_installed(sym)   Check if symbol is hooked.
- *    int  syringe_hook_registry_size()     Max registry capacity (SYRINGE_HOOK_MAX).
- *    void* syringe_hook_jmp_target(src)     Check if addr has a syringe JMP; returns target.
- *
- *  Trampoline internals (also public, used by install_addr):
- *    int  syringe_hook_tramp_install(&t, target, hook, &orig)
- *    void syringe_hook_tramp_remove(&t)
- *
- *  Memory helpers (always available):
- *    void syringe_hook_memfd_open()
- *    int  syringe_hook_mem_write(dst, src, len)
- *    int  syringe_hook_mem_read(dst, src, len)
- *    int  syringe_hook_safe_write(dst, src, len)         — data pages
- *    int  syringe_hook_safe_write_code(dst, src, len)    — code pages (preserves X)
- *    int  syringe_hook_safe_write_ptr(slot, val)         — atomic pointer write
- *
- * ─────────────────────────────────────────────────────────────────────────
- *  CONFIGURATION MACROS (define BEFORE #include)
- * ─────────────────────────────────────────────────────────────────────────
- *
- *  SYRINGE_HOOK_MAX=N
- *      Set the hook registry capacity (default: 32).
- *      Example: #define SYRINGE_HOOK_MAX 64
- *
- *  SYRINGE_HOOK_NO_HELPERS
- *      Strip out remove/count/is_installed/install_addr/read_dst to debloat.
- *      Use when you only call install() in a constructor and never need
- *      cleanup. WARNING: trampoline bounce stubs (mmap-allocated) will
- *      leak on .so unload. Only use for .so's that stay loaded for the
- *      lifetime of the target process.
- *
- *  SYRINGE_HOOK_QUIET
- *      Disable all SYRINGE_HOOK_LOG() output (default: logs to stderr).
- *
- * ─────────────────────────────────────────────────────────────────────────
- *  IMPORTANT — single-TU usage
- * ─────────────────────────────────────────────────────────────────────────
- *
- * Because the registry is `static` (per-translation-unit), you MUST include
- * this header from EXACTLY ONE .c file per .so / executable. The standard
- * pattern for an injectable .so is:
- *
- *     // libhook.c  ← the ONLY .c file in libhook.so that includes this header
- *     #define _GNU_SOURCE
- *     #define SYRINGE_HOOK_MAX 64          // optional: more than 32 hooks
- *     // #define SYRINGE_HOOK_NO_HELPERS   // optional: debloat
- *     // #define SYRINGE_HOOK_QUIET       // optional: compile-time strip logs
- *     #include <syringe/hook/syringe_hook.h>
- *
- *     static int (*orig_open)(const char *, int, ...);
- *     static int my_open(const char *p, int f, ...) { return orig_open(p, f, 0); }
- *
- *     __attribute__((constructor))
- *     static void on_load(void) {
- *         syringe_hook_install("open", (void *)my_open, (void **)&orig_open);
- *     }
- *
- *     __attribute__((destructor))
- *     static void on_unload(void) {
- *         syringe_hook_remove_all();    // requires SYRINGE_HOOK_NO_HELPERS NOT defined
- *     }
- *
- * Build:
- *     gcc -shared -fPIC -O2 -o libhook.so libhook.c \
- *         -I/path/to/syringe/include -ldl -lpthread
- *
- * If you need hook logic split across multiple .c files, keep ALL
- * syringe_hook_install / syringe_hook_remove calls in ONE file and call
- * them from that file's constructor. Other files in the same .so should
- * NOT include this header — each would get its own private registry and
- * hooks won't be visible across files.
- *
- * ─────────────────────────────────────────────────────────────────────────
- *  ARCHITECTURE SUPPORT
- * ─────────────────────────────────────────────────────────────────────────
- *
- * Inline hooking requires a per-arch length-disassembler and JMP encoder.
- * Currently supported:
- *   - x86-64   (full: disasm + trampoline + atomic patch)
- *   - aarch64  (full: disasm + trampoline + PAC/BTI handling)
- *
- * On other archs (arm32, riscv64), the inline trampoline path fails
- * gracefully and only GOT/PLT patching is used.
- *
- * The arch dispatch happens at include time — see include/hook/arch/.
+ * Usage:
+ *   #define _GNU_SOURCE
+ *   #include <syringe/hook/syringe_hook.h>
+ *   int n = syringe_hook_install("open", my_hook, &orig);
  */
 
 #ifndef SYRINGE_HOOK_H

@@ -1,24 +1,7 @@
 /*
  * arch_arm.c — ARM32 (armv7) backend stub for syringe
  *
- * PLACEHOLDER — not implemented yet.
- *
- * syringe_arch_build_shellcode() returns 0, so syringe_inject() fails
- * cleanly with "Failed to build shellcode" rather than emitting garbage.
- * The remaining entry points return failure / 0; they are unreachable from
- * syringe_inject() on this architecture (which bails at shellcode build).
- *
- * Implement per plan.md §3.2 when ARM32 support is needed:
- *   - registers: PTRACE_GETREGSET / SETREGSET with NT_PRSTATUS,
- *                struct pt_regs (r0-r15, cpsr) from <sys/user.h>
- *   - trap:      bkpt #0  (ARM 0xE1200070, Thumb 0xBE00)
- *   - shellcode: push {r0-r12,lr} -> add r0,pc,#path -> mov r1,#0x102 ->
- *                movw/movt r12,dlopen_addr -> blx r12 -> bkpt -> pop -> bx lr
- *   - entry_skip: 0
- *   - relocations: R_ARM_JUMP_SLOT / R_ARM_GLOB_DAT
- *   - gotcha:     Thumb interworking — strip bit 0 of function pointers.
- *
- * See src/arch/arch_x86_64.c for a complete reference implementation.
+ * Not implemented yet. Returns 0 so syringe_inject() fails cleanly.
  */
 #define _GNU_SOURCE
 

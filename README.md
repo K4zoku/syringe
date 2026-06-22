@@ -31,6 +31,8 @@ sudo ldconfig
 | `${includedir}/syringe/hook/arch/syringe_hook_x86_64.h` | x86-64 inline trampoline backend |
 | `${includedir}/syringe/hook/arch/syringe_hook_aarch64.h` | aarch64 inline trampoline backend |
 | `${includedir}/syringe/hook/syringe_hook_dotnet.h` | .NET diagnostic IPC helpers (header-only) |
+| - | |
+| [idk-overlay](https://github.com/K4zoku/idk-overlay) | Real-world use: GLES/GLX/SDL/Wayland hook overlay for games |
 | `${bindir}/syringe-cli` | CLI tool |
 | `${libdir}/pkgconfig/libsyringe.pc` | pkg-config for injection |
 

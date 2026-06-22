@@ -478,6 +478,10 @@ static inline int syringe_hook_install(const char *sym, void *hook, void **orig_
 
     SyringeHookRecord *rec = &syringe_hooks[syringe_nhooks];
     memset(rec, 0, sizeof(*rec));
+    if (strlen(sym) >= sizeof(rec->sym)) {
+        SYRINGE_HOOK_LOG("'%s': symbol name too long (max %zu)", sym, sizeof(rec->sym) - 1);
+        return 0;
+    }
     strncpy(rec->sym, sym, sizeof(rec->sym)-1);
     rec->hook     = hook;
     rec->orig_out = orig_out;
@@ -544,6 +548,10 @@ static inline int syringe_hook_install_addr(const char *sym, void *target,
 
     SyringeHookRecord *rec = &syringe_hooks[syringe_nhooks];
     memset(rec, 0, sizeof(*rec));
+    if (strlen(sym) >= sizeof(rec->sym)) {
+        SYRINGE_HOOK_LOG("'%s': symbol name too long (max %zu)", sym, sizeof(rec->sym) - 1);
+        return 0;
+    }
     strncpy(rec->sym, sym, sizeof(rec->sym)-1);
     rec->hook      = hook;
     rec->orig_out  = orig_out;

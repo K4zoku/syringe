@@ -423,9 +423,60 @@ int syringe_inject_dotnet(pid_t pid, const char *so_path) {
     /* Resolve the target .so to absolute path — .NET runtime runs in a
      * different process with potentially different CWD. */
     char abs_path[4096];
-    if (!realpath(so_path, abs_path)) {
-        fprintf(stderr, "[!] [dotnet] realpath('%s'): %s\n", so_path, strerror(errno));
-        return SYRINGE_DOTNET_ERROR;
+
+    if (so_path[0] == '/') {
+        strncpy(abs_path, so_path, sizeof(abs_path) - 1);
+        abs_path[sizeof(abs_path) - 1] = '\0';
+    } else if (so_path[0] == '.') {
+        if (!realpath(so_path, abs_path)) {
+            fprintf(stderr, "[!] [dotnet] realpath('%s'): %s\n", so_path, strerror(errno));
+            return SYRINGE_DOTNET_ERROR;
+        }
+    } else {
+        char candidate[4096];
+        int found = 0;
+
+        /* Try CWD */
+        snprintf(candidate, sizeof(candidate), "./%s", so_path);
+        if (realpath(candidate, abs_path)) found = 1;
+
+        /* Try each directory in LD_LIBRARY_PATH */
+        int has_usr_local_lib = 0, has_usr_lib = 0;
+        const char *ld_lib = getenv("LD_LIBRARY_PATH");
+        if (!found && ld_lib && ld_lib[0]) {
+            char ld_buf[4096];
+            strncpy(ld_buf, ld_lib, sizeof(ld_buf) - 1);
+            ld_buf[sizeof(ld_buf) - 1] = '\0';
+            char *saveptr, *dir = strtok_r(ld_buf, ":", &saveptr);
+            while (dir && !found) {
+                if (strcmp(dir, "/usr/local/lib") == 0) has_usr_local_lib = 1;
+                if (strcmp(dir, "/usr/lib") == 0) has_usr_lib = 1;
+                snprintf(candidate, sizeof(candidate), "%s/%s", dir, so_path);
+                if (realpath(candidate, abs_path)) found = 1;
+                dir = strtok_r(NULL, ":", &saveptr);
+            }
+        }
+
+        /* Fallback to standard paths not already covered by LD_LIBRARY_PATH */
+        if (!found) {
+            const char *fallback[2];
+            int n = 0;
+            if (!has_usr_local_lib) fallback[n++] = "/usr/local/lib";
+            if (!has_usr_lib) fallback[n++] = "/usr/lib";
+            for (int i = 0; i < n && !found; i++) {
+                snprintf(candidate, sizeof(candidate), "%s/%s", fallback[i], so_path);
+                if (access(candidate, F_OK) == 0) {
+                    strncpy(abs_path, candidate, sizeof(abs_path) - 1);
+                    abs_path[sizeof(abs_path) - 1] = '\0';
+                    found = 1;
+                }
+            }
+        }
+
+        if (!found) {
+            fprintf(stderr, "[!] [dotnet] library '%s' not found in CWD, LD_LIBRARY_PATH, /usr/local/lib, or /usr/lib\n", so_path);
+            return SYRINGE_DOTNET_ERROR;
+        }
     }
 
     /* Write overlay path to /tmp/woverlay_path — the profiler's constructor

@@ -1,7 +1,7 @@
 project(
     'syringe',
     ['c', 'cpp'],
-    version: '0.6.0',
+    version: '0.7.0',
     default_options: [
         'warning_level=3',
         'c_std=gnu11',
@@ -26,7 +26,7 @@ cc = meson.get_compiler('c')
 pthread_lib = cc.find_library('pthread', required: true)
 dl_lib = cc.find_library('dl', required: true)
 
-inc = include_directories('include')
+inc = include_directories('include', 'include/public')
 
 # ── Architecture selection ────────────────────────────────────────────────
 # Exactly one arch backend is compiled in, chosen from the host CPU family.
@@ -134,13 +134,13 @@ syringe_lib = library(
     c_args: project_c_flags,
     include_directories: [inc, include_directories('.')],
     link_args: ['-ldl', '-lpthread'],
-    version: '0.6',
+    version: '0.7',
     install: true,
 )
 
 # Install injector header (syringe.h) under subdir 'syringe/'
 install_headers(
-    ['include/syringe.h'],
+    ['include/public/syringe.h'],
     subdir: 'syringe',
 )
 
@@ -148,14 +148,15 @@ install_headers(
 # Public:     syringe_hook.h (user includes this)
 # Internal:   syringe_hook_common.h, arch/* (included transitively)
 install_headers(
-    ['include/hook/syringe_hook.h',
-     'include/hook/syringe_hook_common.h'],
+    ['include/public/hook/syringe_hook.h',
+     'include/public/hook/syringe_hook_common.h',
+     'include/public/hook/syringe_hook_types.h'],
     subdir: 'syringe/hook',
 )
 install_headers(
-    ['include/hook/arch/syringe_hook_arch.h',
-     'include/hook/arch/syringe_hook_x86_64.h',
-     'include/hook/arch/syringe_hook_aarch64.h'],
+    ['include/public/hook/arch/syringe_hook_arch.h',
+     'include/public/hook/arch/syringe_hook_x86_64.h',
+     'include/public/hook/arch/syringe_hook_aarch64.h'],
     subdir: 'syringe/hook/arch',
 )
 

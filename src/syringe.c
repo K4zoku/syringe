@@ -54,7 +54,7 @@
 #include <dirent.h>
 #include <dlfcn.h>
 
-#include "arch/arch.h"   /* per-architecture shellcode + register backend */
+#include "arch.h"   /* per-architecture shellcode + register backend */
 #include "dotnet/dotnet_diagnostic.h"  /* .NET diagnostic IPC (no-ptrace injection) */
 
 /* ── internal prototype (not in public header) ────────────────────────────

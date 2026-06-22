@@ -103,9 +103,11 @@ static inline void syringe_hook_log_init(void) {
 #include "arch/syringe_hook_x86_64.h"
 #elif defined(__aarch64__)
 #include "arch/syringe_hook_aarch64.h"
-#elif defined(__arm__)
+#elif 0 && defined(__arm__)
+// [TODO] arm32 hooker — not yet implemented
 #include "arch/syringe_hook_arm.h"
-#elif defined(__riscv) && __riscv_xlen == 64
+#elif 0 && defined(__riscv) && __riscv_xlen == 64
+// [TODO] riscv64 hooker — not yet implemented
 #include "arch/syringe_hook_riscv64.h"
 #else
 #warning "syringe_hook: unsupported architecture — only GOT/PLT patching will work"

@@ -1,3 +1,4 @@
+// [TODO] arm32 (armv7) — not yet implemented
 /*
  * arch_arm.c — ARM32 (armv7) backend stub for syringe
  *

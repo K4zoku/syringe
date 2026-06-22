@@ -1,3 +1,4 @@
+// [TODO] riscv64 — not yet implemented
 /*
  * arch_riscv64.c — RISC-V 64 backend stub for syringe
  *

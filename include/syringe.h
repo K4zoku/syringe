@@ -114,7 +114,7 @@ int syringe_inject_with_retry(pid_t pid, const char *so_path,
  *
  * Note: the .so must be a valid .NET COM profiler (export DllGetClassObject
  * and implement ICorProfilerCallback). For regular .so injection, use the
- * syringe-dotnet-profiler.so wrapper (TODO: not yet implemented).
+ * libsyringe-dotnet-profiler.so wrapper (TODO: not yet implemented).
  */
 int syringe_inject_dotnet(pid_t pid, const char *so_path);
 

@@ -2,7 +2,7 @@
  * corprof_min.h — Minimal .NET profiler COM interface definitions
  *
  * Vendored from corprof.h (dotnet/runtime). Only includes the interface
- * definitions needed for syringe-dotnet-profiler.so — no .NET SDK required.
+ * definitions needed for libsyringe-dotnet-profiler.so — no .NET SDK required.
  *
  * ICorProfilerCallback3 vtable layout (77 methods total):
  *   IUnknown (3):                    QueryInterface, AddRef, Release

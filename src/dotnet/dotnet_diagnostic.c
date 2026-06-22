@@ -491,14 +491,14 @@ int syringe_inject_dotnet(pid_t pid, const char *so_path) {
         if (syringe_verbose) fprintf(stderr, "[*] [dotnet] Warning: cannot write /tmp/woverlay_path\n");
     }
 
-    /* Find syringe-dotnet-profiler.so — the COM profiler wrapper that
+    /* Find libsyringe-dotnet-profiler.so — the COM profiler wrapper that
      * .NET will dlopen. It receives abs_path as client_data and dlopens it.
      *
      * Search order:
      * 1. SYRINGE_PROFILER_PATH env var (for testing/dev)
      * 2. Same directory as the target .so (common case: both in build/)
-     * 3. /usr/local/lib/syringe-dotnet-profiler.so (installed)
-     * 4. /usr/lib/syringe-dotnet-profiler.so (distro install)
+     * 3. /usr/local/lib/libsyringe-dotnet-profiler.so (installed)
+     * 4. /usr/lib/libsyringe-dotnet-profiler.so (distro install)
      */
     char profiler_path[4096];
     const char* env = getenv("SYRINGE_PROFILER_PATH");
@@ -514,20 +514,20 @@ int syringe_inject_dotnet(pid_t pid, const char *so_path) {
         const char* slash = strrchr(abs_path, '/');
         if (slash) {
             size_t dir_len = (size_t)(slash - abs_path);
-            snprintf(profiler_path, sizeof(profiler_path), "%.*s/syringe-dotnet-profiler.so",
+            snprintf(profiler_path, sizeof(profiler_path), "%.*s/libsyringe-dotnet-profiler.so",
                      (int)dir_len, abs_path);
         } else {
             snprintf(profiler_path, sizeof(profiler_path),
-                     "./syringe-dotnet-profiler.so");
+                     "./libsyringe-dotnet-profiler.so");
         }
 
         /* Check if exists, else try installed paths */
         if (access(profiler_path, F_OK) != 0) {
             snprintf(profiler_path, sizeof(profiler_path),
-                     "/usr/local/lib/syringe-dotnet-profiler.so");
+                     "/usr/local/lib/libsyringe-dotnet-profiler.so");
             if (access(profiler_path, F_OK) != 0) {
                 snprintf(profiler_path, sizeof(profiler_path),
-                         "/usr/lib/syringe-dotnet-profiler.so");
+                         "/usr/lib/libsyringe-dotnet-profiler.so");
             }
         }
     }

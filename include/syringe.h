@@ -63,7 +63,7 @@ extern "C" {
 int syringe_inject(pid_t pid, const char *so_path);
 
 /**
- * Inject a shared library with multi-region retry.
+ * Inject a shared library with multi-region retry and configurable delay.
  *
  * Same as syringe_inject, but if the first executable region fails
  * (SIGSEGV, EACCES, EAGAIN, etc.), tries the NEXT executable region
@@ -74,15 +74,27 @@ int syringe_inject(pid_t pid, const char *so_path);
  * which typically means: main binary text → libc → ld-linux → other libs.
  * The main binary is usually the safest to patch, so it's tried first.
  *
- * @param pid         Target process ID
- * @param so_path     Path to the .so file (resolved via realpath)
- * @param max_retries Maximum number of regions to try:
- *                    - `> 0`: try at most max_retries regions
- *                    - `0`:   try only the first region (same as syringe_inject)
- *                    - `< 0`: try ALL executable regions (unlimited)
- * @return            0 on success, -1 if all attempts failed
+ * Thread-wait logic: when ALL threads are in blocking syscalls (common
+ * for event-loop apps like eglgears_wayland and osu!), this function
+ * waits up to `retry_delay_ms × 10` (capped at 2s) for a thread to exit
+ * its syscall before giving up on that region. This avoids the need to
+ * scan hundreds of regions — usually 1-2 region attempts with thread-wait
+ * is enough.
+ *
+ * @param pid            Target process ID
+ * @param so_path        Path to the .so file (resolved via realpath)
+ * @param max_retries    Maximum number of regions to try:
+ *                       - `> 0`: try at most max_retries regions
+ *                       - `0`:   try only the first region (same as syringe_inject)
+ *                       - `< 0`: try ALL executable regions (unlimited)
+ * @param retry_delay_ms Delay between region attempts in milliseconds.
+ *                       Also sets the thread-wait timeout (10× this value,
+ *                       capped at 2s). 0 = no delay (fast but may fail
+ *                       on multithreaded targets). 100 is a good default.
+ * @return               0 on success, -1 if all attempts failed
  */
-int syringe_inject_with_retry(pid_t pid, const char *so_path, int max_retries);
+int syringe_inject_with_retry(pid_t pid, const char *so_path,
+                               int max_retries, int retry_delay_ms);
 
 #ifdef __cplusplus
 }

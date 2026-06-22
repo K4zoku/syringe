@@ -48,6 +48,9 @@
 #include <sys/wait.h>
 #include <sys/user.h>
 #include <sys/uio.h>
+#include <sys/socket.h>  /* socklen_t for PTRACE_GET_SYSCALL_INFO */
+#include <linux/ptrace.h>  /* struct ptrace_syscall_info, PTRACE_GET_SYSCALL_INFO */
+#include <sys/time.h>      /* ualarm */
 #include <dirent.h>
 #include <dlfcn.h>
 
@@ -249,6 +252,218 @@ static MapEntry *find_all_maps(pid_t pid, const char *perms_must,
     return arr;
 }
 
+/*
+ * Enumerate all thread IDs in /proc/<pid>/task/.
+ * Returns malloc'd array (caller frees) and sets *count.
+ * Returns NULL on failure.
+ */
+static pid_t *find_all_threads(pid_t pid, size_t *count) {
+    char task_path[64];
+    snprintf(task_path, sizeof(task_path), "/proc/%d/task", pid);
+    DIR *td = opendir(task_path);
+    if (!td) { perror("opendir task"); return NULL; }
+
+    size_t n = 0;
+    struct dirent *de;
+    while ((de = readdir(td))) {
+        if (de->d_name[0] >= '0' && de->d_name[0] <= '9') n++;
+    }
+    rewinddir(td);
+
+    if (n == 0) { closedir(td); return NULL; }
+
+    pid_t *tids = malloc(n * sizeof(pid_t));
+    if (!tids) { closedir(td); return NULL; }
+
+    size_t i = 0;
+    while ((de = readdir(td)) && i < n) {
+        if (de->d_name[0] >= '0' && de->d_name[0] <= '9') {
+            tids[i++] = (pid_t)atoi(de->d_name);
+        }
+    }
+    closedir(td);
+    *count = i;
+    return tids;
+}
+
+/*
+ * Check if a thread is currently blocked in a syscall.
+ *
+ * Reads /proc/<tid>/syscall:
+ *   - "running"    → thread is on CPU, NOT in a syscall
+ *   - "" (empty)   → thread is stopped, NOT in a syscall
+ *   - "<num> ..."  → thread is blocked in syscall number <num>
+ *
+ * Why this matters: when a thread is in a blocking syscall (poll, futex,
+ * epoll_wait, read, etc.), PTRACE_SETREGS changing RIP has NO EFFECT —
+ * the kernel ignores RIP changes until the syscall returns. The shellcode
+ * never executes, and the thread stays blocked → eventually gets SIGSEGV
+ * → injection fails.
+ *
+ * Returns 1 if in syscall, 0 if not (or can't tell).
+ *
+ * NOTE: this reads /proc BEFORE ptrace attach. After attach, the thread
+ * is stopped and /proc/<tid>/syscall may return "running" or empty
+ * regardless of pre-stop state. For post-attach syscall detection, use
+ * wait_for_syscall_exit() which uses PTRACE_SYSCALL + PTRACE_GET_SYSCALL_INFO.
+ */
+static int thread_in_syscall(pid_t tid) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/syscall", tid);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;  /* can't tell — assume not in syscall */
+
+    char buf[256];
+    if (!fgets(buf, sizeof(buf), f)) {
+        fclose(f);
+        return 0;  /* empty = stopped, not in syscall */
+    }
+    fclose(f);
+
+    /* "running" = on CPU, not in syscall */
+    if (strncmp(buf, "running", 7) == 0) return 0;
+
+    /* Anything else (a syscall number) = in syscall */
+    return 1;
+}
+
+/*
+ * Wait for a thread to exit its current syscall, then return it stopped
+ * at syscall-exit (ready for RIP modification).
+ *
+ * Uses PTRACE_SYSCALL + PTRACE_GET_SYSCALL_INFO (Linux 5.3+):
+ *   1. PTRACE_SYSCALL — continue thread until next syscall entry/exit
+ *   2. waitpid — block until syscall boundary hit (no polling!)
+ *   3. PTRACE_GET_SYSCALL_INFO — check if at entry or exit
+ *   4. If at entry, PTRACE_SYSCALL again to continue to exit
+ *
+ * This is the correct way to wait for syscall exit on a ptrace-attached
+ * thread. Reading /proc/<tid>/syscall after attach is unreliable because
+ * the thread is already stopped.
+ *
+ * Returns 0 on success (thread stopped at syscall-exit, ready for SETREGS),
+ * -1 on failure (error, or thread died).
+ *
+ * Note: this uses blocking waitpid() — no timeout. The kernel wakes us
+ * as soon as the syscall boundary is hit, which is typically within a
+ * few ms for event-loop apps. If the thread is stuck in a truly blocking
+ * syscall (e.g., read with no data), this could block indefinitely.
+ * The caller should handle this case via retry loop if needed.
+ */
+/*
+ * Wait for a thread to exit its current syscall, then return it stopped
+ * at syscall-exit (ready for RIP modification).
+ *
+ * Uses PTRACE_SYSCALL + PTRACE_GET_SYSCALL_INFO (Linux 5.3+):
+ *   1. PTRACE_SYSCALL — continue thread until next syscall entry/exit
+ *   2. waitpid with timeout (via SIGALRM) — block until syscall boundary
+ *   3. PTRACE_GET_SYSCALL_INFO — check if at entry or exit
+ *   4. If at entry, PTRACE_SYSCALL again to continue to exit
+ *
+ * This is the correct way to wait for syscall exit on a ptrace-attached
+ * thread. Reading /proc/<tid>/syscall after attach is unreliable because
+ * the thread is already stopped.
+ *
+ * timeout_ms: max time to wait. 0 = blocking (no timeout). If the thread
+ * is stuck in a truly blocking syscall (e.g., futex with no timeout),
+ * this prevents hanging forever.
+ *
+ * Returns 0 on success (thread stopped at syscall-exit, ready for SETREGS),
+ * -1 on failure (timeout, error, or thread died).
+ */
+static volatile sig_atomic_t g_syscall_wait_timed_out = 0;
+
+static void syscall_wait_alarm_handler(int sig) {
+    (void)sig;
+    g_syscall_wait_timed_out = 1;
+}
+
+static int wait_for_syscall_exit(pid_t tid, int timeout_ms) {
+    /* Set up SIGALRM timeout if requested. */
+    struct sigaction old_sa;
+    int has_alarm = 0;
+    if (timeout_ms > 0) {
+        struct sigaction sa = {0};
+        sa.sa_handler = syscall_wait_alarm_handler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;  /* no SA_RESTART — we want EINTR */
+        if (sigaction(SIGALRM, &sa, &old_sa) == 0) {
+            g_syscall_wait_timed_out = 0;
+            ualarm((useconds_t)timeout_ms * 1000, 0);
+            has_alarm = 1;
+        }
+    }
+
+    /* Continue until next syscall boundary. */
+    if (ptrace(PTRACE_SYSCALL, tid, NULL, NULL) < 0) {
+        if (has_alarm) { alarm(0); sigaction(SIGALRM, &old_sa, NULL); }
+        return -1;
+    }
+
+    /* Block until the syscall boundary is hit (or timeout). */
+    int status;
+    int wp = waitpid(tid, &status, __WALL);
+    if (has_alarm) { alarm(0); sigaction(SIGALRM, &old_sa, NULL); }
+
+    if (g_syscall_wait_timed_out || wp < 0) {
+        return -1;  /* timeout or error */
+    }
+
+    if (!WIFSTOPPED(status)) {
+        return -1;  /* thread died or unexpected status */
+    }
+
+    int sig = WSTOPSIG(status);
+    /* SIGTRAP | 0x80 indicates a syscall stop (PTRACE_O_TRACESYSGOOD) */
+    if (sig != (SIGTRAP | 0x80)) {
+        /* Got a different signal (real signal, not syscall trap). */
+        return -1;
+    }
+
+    /* Check if at syscall entry or exit. */
+    struct ptrace_syscall_info info;
+    socklen_t infolen = sizeof(info);
+    if (ptrace(PTRACE_GET_SYSCALL_INFO, tid, infolen, &info) < 0) {
+        /* Fallback: assume we're at the right place. Older kernels
+         * without PTRACE_GET_SYSCALL_INFO (Linux < 5.3) will hit this. */
+        return 0;
+    }
+
+    if (info.op == PTRACE_SYSCALL_INFO_EXIT) {
+        return 0;  /* ready for RIP modification */
+    }
+
+    if (info.op == PTRACE_SYSCALL_INFO_ENTRY) {
+        /* At syscall-entry. Continue once more to reach syscall-exit.
+         * Re-arm timeout for this second wait. */
+        if (timeout_ms > 0) {
+            struct sigaction sa = {0};
+            sa.sa_handler = syscall_wait_alarm_handler;
+            sigemptyset(&sa.sa_mask);
+            sa.sa_flags = 0;
+            if (sigaction(SIGALRM, &sa, &old_sa) == 0) {
+                g_syscall_wait_timed_out = 0;
+                ualarm((useconds_t)timeout_ms * 1000, 0);
+                has_alarm = 1;
+            }
+        }
+        if (ptrace(PTRACE_SYSCALL, tid, NULL, NULL) < 0) {
+            if (has_alarm) { alarm(0); sigaction(SIGALRM, &old_sa, NULL); }
+            return -1;
+        }
+        wp = waitpid(tid, &status, __WALL);
+        if (has_alarm) { alarm(0); sigaction(SIGALRM, &old_sa, NULL); }
+        if (g_syscall_wait_timed_out || wp < 0) return -1;
+        if (!WIFSTOPPED(status) || WSTOPSIG(status) != (SIGTRAP | 0x80)) {
+            return -1;
+        }
+        return 0;
+    }
+
+    /* Unknown state — proceed anyway, best effort. */
+    return 0;
+}
+
 /* ── symbol resolution in target process ───────────────────────────────── */
 
 /*
@@ -356,7 +571,8 @@ size_t syringe_build_shellcode(unsigned char *buf, size_t bufsz,
 static int syringe_inject_at(pid_t pid, const char *abs_path,
                               unsigned long dlopen_addr,
                               unsigned long inject_addr,
-                              const char *region_name) {
+                              const char *region_name,
+                              int thread_wait_ms) {
     INJ_LOG("Injection site: 0x%lx (%s)", inject_addr,
             region_name ? region_name : "?");
 
@@ -376,7 +592,8 @@ static int syringe_inject_at(pid_t pid, const char *abs_path,
     /* Use PTRACE_SEIZE (Linux 3.0+) instead of PTRACE_ATTACH.
      *
      * Why: PTRACE_ATTACH sends SIGSTOP to the MAIN thread only. If the
-     * target is multithreaded (.NET runtime, Wayland compositor, eglgears),
+     * target is multithreaded (runtimes with anti-debug like .NET CoreCLR,
+     * Wayland compositor, eglgears),
      * the OTHER threads keep running while we write shellcode → they hit
      * the half-written code → SIGSEGV → "Process stopped with signal 11".
      *
@@ -390,64 +607,158 @@ static int syringe_inject_at(pid_t pid, const char *abs_path,
     int *all_tids = NULL;
     size_t n_tids = 0;
 
-    if (ptrace(PTRACE_SEIZE, pid, NULL, PTRACE_O_TRACECLONE) == 0) {
-        /* Enumerate all threads in /proc/<pid>/task/ and stop them. */
-        char task_path[64];
-        snprintf(task_path, sizeof(task_path), "/proc/%d/task", pid);
-        DIR *td = opendir(task_path);
-        if (td) {
-            struct dirent *de;
-            /* First pass: count */
-            while ((de = readdir(td))) {
-                if (de->d_name[0] >= '0' && de->d_name[0] <= '9') n_tids++;
-            }
-            rewinddir(td);
-            all_tids = malloc(n_tids * sizeof(int));
-            size_t i = 0;
-            while ((de = readdir(td)) && i < n_tids) {
-                if (de->d_name[0] >= '0' && de->d_name[0] <= '9') {
-                    all_tids[i++] = atoi(de->d_name);
-                }
-            }
-            closedir(td);
-        }
-        /* INTERRUPT the main thread — this stops ALL threads atomically
-         * because they share the same ptrace stop state. */
+    if (ptrace(PTRACE_SEIZE, pid, NULL,
+                PTRACE_O_TRACECLONE | PTRACE_O_TRACESYSGOOD) == 0) {
+        /* INTERRUPT stops ALL threads atomically. */
         if (ptrace(PTRACE_INTERRUPT, pid, NULL, NULL) < 0) {
             INJ_LOG("PTRACE_INTERRUPT failed: %s — proceeding anyway", strerror(errno));
         }
-        if (waitpid(pid, NULL, 0) < 0) {
+        /* Wait for main thread to stop (sync point — all threads are
+         * stopped by this point). Use __WALL to handle clone children. */
+        if (waitpid(pid, NULL, __WALL) < 0) {
             INJ_ERR("waitpid (seize): %s", strerror(errno));
-            free(all_tids);
+            ptrace(PTRACE_DETACH, pid, NULL, NULL);
             return -1;
         }
+
+        /* Enumerate all threads via helper. */
+        all_tids = find_all_threads(pid, &n_tids);
         INJ_OK("Attached via SEIZE (stopped %zu thread%s)",
                n_tids, n_tids == 1 ? "" : "s");
     } else {
-        /* Fallback: classic ATTACH (single-thread stop only) */
+        /* Fallback: classic ATTACH (single-thread stop only).
+         * If SEIZE failed with EPERM (Operation not permitted), the target
+         * likely has anti-debug protection (e.g., prctl PR_SET_DUMPABLE 0,
+         * seccomp, or runtime anti-debug). ATTACH will also fail with EPERM.
+         * Return special error code -2 to tell the retry loop to ABORT
+         * (no point trying 666 regions if ptrace is blocked). */
+        if (errno == EPERM) {
+            INJ_ERR("PTRACE_SEIZE: %s — target likely has anti-debug protection "
+                    "(seccomp, prctl PR_SET_DUMPABLE, or runtime anti-debug). "
+                    "Aborting — retry will not help.", strerror(errno));
+            return -2;  /* special: abort retry loop */
+        }
         INJ_LOG("PTRACE_SEIZE failed: %s — falling back to ATTACH", strerror(errno));
         if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) < 0) {
+            if (errno == EPERM) {
+                INJ_ERR("ptrace ATTACH: %s — target has anti-debug protection. "
+                        "Aborting.", strerror(errno));
+                return -2;  /* special: abort retry loop */
+            }
             INJ_ERR("ptrace ATTACH: %s", strerror(errno));
             return -1;
         }
-        if (waitpid(pid, NULL, 0) < 0) {
+        if (waitpid(pid, NULL, __WALL) < 0) {
             INJ_ERR("waitpid: %s", strerror(errno));
             return -1;
         }
+        /* Single-thread fallback — only the main thread is available. */
+        all_tids = malloc(sizeof(pid_t));
+        if (all_tids) { all_tids[0] = pid; n_tids = 1; }
         INJ_OK("Attached via ATTACH (single-thread — multithread targets may SIGSEGV)");
     }
 
-    /* ── Save registers ── */
+    /* ── Pick the best thread for injection ──
+     * Skip threads in blocking syscalls — PTRACE_SETREGS can't redirect
+     * RIP while a thread is in a syscall. The kernel ignores RIP changes
+     * until the syscall returns, so the shellcode would never execute.
+     * This is the root cause of the "Process stopped with signal 11"
+     * failures on multithreaded targets like eglgears_wayland and osu!.
+     *
+     * Strategy:
+     *   1. Pick the first thread NOT in a syscall (via /proc/<tid>/syscall,
+     *      read BEFORE attach — post-attach reads are unreliable).
+     *   2. If ALL threads appear to be in syscalls, use wait_for_syscall_exit()
+     *      on the main thread — this uses PTRACE_SYSCALL + PTRACE_GET_SYSCALL_INFO
+     *      to block until the thread hits a syscall boundary, no polling.
+     *      The thread will be stopped at syscall-exit, ready for SETREGS.
+     *   3. If wait_for_syscall_exit() fails, fall back to main thread
+     *      (best effort — the retry loop will try another region). */
+    pid_t inj_tid = pid;  /* default: main thread */
+    size_t n_in_syscall = 0;
+    int syscall_wait_done = 0;
+
+    if (all_tids && n_tids > 0) {
+        for (size_t i = 0; i < n_tids; i++) {
+            if (thread_in_syscall(all_tids[i])) {
+                n_in_syscall++;
+                continue;
+            }
+            inj_tid = all_tids[i];
+            break;
+        }
+    }
+
+    /* If all threads are in syscall, use PTRACE_SYSCALL to wait for
+     * ANY thread to exit its syscall. Try each thread until one succeeds.
+     * This is the correct ptrace way — polling /proc/<tid>/syscall doesn't
+     * work post-attach because the thread is already stopped.
+     *
+     * PTRACE_SYSCALL + waitpid blocks until the next syscall boundary,
+     * which is usually within a few ms for event-loop apps. We try each
+     * thread with a short timeout so we don't hang on truly blocking
+     * syscalls (e.g., futex with no timeout).
+     *
+     * NOTE: all_tids[0] is usually == pid (main thread), so if it succeeds
+     * we set inj_tid = pid but mark syscall_wait_done = 1 to distinguish
+     * from the "no thread succeeded" fallback case. */
+    if (n_in_syscall == n_tids && n_tids > 0 && thread_wait_ms > 0) {
+        INJ_LOG("All %zu thread(s) in syscall — trying PTRACE_SYSCALL on each "
+                "(timeout %d ms per thread)", n_tids, thread_wait_ms);
+
+        /* Try each thread with PTRACE_SYSCALL until one exits its syscall.
+         * Use a per-thread timeout so we don't hang on futex/poll forever. */
+        int per_thread_timeout = thread_wait_ms;
+        if (per_thread_timeout > 500) per_thread_timeout = 500;  /* cap */
+
+        for (size_t i = 0; i < n_tids; i++) {
+            if (wait_for_syscall_exit(all_tids[i], per_thread_timeout) == 0) {
+                inj_tid = all_tids[i];
+                syscall_wait_done = 1;
+                INJ_LOG("Thread %d reached syscall-exit — ready for injection", inj_tid);
+                break;
+            }
+        }
+
+        if (!syscall_wait_done) {
+            INJ_LOG("No thread exited syscall within timeout — using main thread "
+                    "(best effort, retry loop will try next region)");
+        }
+    }
+
+    if (syscall_wait_done) {
+        INJ_LOG("Using thread %d (waited for syscall exit)", inj_tid);
+    } else if (inj_tid != pid) {
+        INJ_LOG("Selected thread %d for injection (not in syscall)", inj_tid);
+    } else if (n_in_syscall > 0) {
+        INJ_LOG("All %zu thread(s) still in syscall after wait — using main thread "
+                "(best effort, retry loop will try next region)", n_tids);
+    }
+
+    /* ── Save registers of the chosen thread ── */
     SyringeArchRegs regs_orig, regs_new;
-    if (syringe_arch_getregs(pid, &regs_orig) < 0) {
-        INJ_ERR("ptrace GETREGS: %s", strerror(errno));
+    if (syringe_arch_getregs(inj_tid, &regs_orig) < 0) {
+        /* "No such process" means the thread died between attach and
+         * GETREGS — common on runtimes with anti-debug (e.g., .NET CoreCLR,
+         * Java JVM, anti-cheat) which kill ptraced threads.
+         * Return -2 to abort the retry loop: target has likely set
+         * PR_SET_DUMPABLE=0, so further attempts will EPERM anyway. */
+        if (errno == ESRCH) {
+            INJ_ERR("ptrace GETREGS (tid %d): thread died — target runtime likely "
+                    "killed it after detecting ptrace (anti-debug). Aborting.",
+                    inj_tid);
+            ptrace(PTRACE_DETACH, pid, NULL, NULL);
+            free(all_tids);
+            return -2;  /* abort retry loop */
+        }
+        INJ_ERR("ptrace GETREGS (tid %d): %s", inj_tid, strerror(errno));
         ptrace(PTRACE_DETACH, pid, NULL, NULL);
         free(all_tids);
         return -1;
     }
-    INJ_LOG("Original RIP: 0x%lx RSP: 0x%lx",
+    INJ_LOG("Original RIP: 0x%lx RSP: 0x%lx (tid %d)",
             syringe_arch_get_pc(&regs_orig),
-            syringe_arch_get_sp(&regs_orig));
+            syringe_arch_get_sp(&regs_orig), inj_tid);
 
     /* ── Backup original memory at injection site ── */
     unsigned char orig_mem[512];
@@ -460,8 +771,8 @@ static int syringe_inject_at(pid_t pid, const char *abs_path,
     /* ── Redirect PC -> shellcode (+ entry_skip for ptrace restart quirk) ── */
     memcpy(&regs_new, &regs_orig, sizeof(regs_orig));
     syringe_arch_set_pc(&regs_new, inject_addr + syringe_arch_entry_skip());
-    if (syringe_arch_setregs(pid, &regs_new) < 0) {
-        INJ_ERR("ptrace SETREGS: %s", strerror(errno));
+    if (syringe_arch_setregs(inj_tid, &regs_new) < 0) {
+        INJ_ERR("ptrace SETREGS (tid %d): %s", inj_tid, strerror(errno));
         /* Restore memory before detaching */
         remote_write_bytes(pid, inject_addr, orig_mem, sc_len);
         ptrace(PTRACE_DETACH, pid, NULL, NULL);
@@ -476,21 +787,21 @@ static int syringe_inject_at(pid_t pid, const char *abs_path,
      * might have already succeeded (library loaded, constructor may
      * have run). Best effort: restore original state and detach,
      * let the process continue. Report success if library was loaded. */
-    INJ_LOG("Running shellcode ...");
-    if (ptrace(PTRACE_CONT, pid, NULL, NULL) < 0) {
-        INJ_ERR("ptrace CONT: %s", strerror(errno));
+    INJ_LOG("Running shellcode in thread %d ...", inj_tid);
+    if (ptrace(PTRACE_CONT, inj_tid, NULL, NULL) < 0) {
+        INJ_ERR("ptrace CONT (tid %d): %s", inj_tid, strerror(errno));
         remote_write_bytes(pid, inject_addr, orig_mem, sc_len);
-        syringe_arch_setregs(pid, &regs_orig);
+        syringe_arch_setregs(inj_tid, &regs_orig);
         ptrace(PTRACE_DETACH, pid, NULL, NULL);
         free(all_tids);
         return -1;
     }
 
     int status;
-    if (waitpid(pid, &status, 0) < 0) {
-        INJ_ERR("waitpid (shellcode): %s", strerror(errno));
+    if (waitpid(inj_tid, &status, __WALL) < 0) {
+        INJ_ERR("waitpid (shellcode, tid %d): %s", inj_tid, strerror(errno));
         remote_write_bytes(pid, inject_addr, orig_mem, sc_len);
-        syringe_arch_setregs(pid, &regs_orig);
+        syringe_arch_setregs(inj_tid, &regs_orig);
         ptrace(PTRACE_DETACH, pid, NULL, NULL);
         free(all_tids);
         return -1;
@@ -498,21 +809,21 @@ static int syringe_inject_at(pid_t pid, const char *abs_path,
 
     int rc = 0;
     if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP) {
-        INJ_OK("Shellcode executed (SIGTRAP received)");
+        INJ_OK("Shellcode executed (SIGTRAP received from tid %d)", inj_tid);
     } else if (WIFSTOPPED(status)) {
         /* SIGSEGV or other signal — shellcode may have crashed.
          * But dlopen might have succeeded before the crash.
          * Restore state and detach — let the process continue.
          * The library constructor will run if dlopen completed.
          * Return -1 so the retry loop can try another region. */
-        fprintf(stderr, "[!] Process stopped with signal %d (expected SIGTRAP) — "
+        fprintf(stderr, "[!] Thread %d stopped with signal %d (expected SIGTRAP) — "
                 "region 0x%lx (%s) failed\n",
-                WSTOPSIG(status), inject_addr,
+                inj_tid, WSTOPSIG(status), inject_addr,
                 region_name ? region_name : "?");
         fprintf(stderr, "[!] Restoring state and detaching (library may still have loaded)\n");
         rc = -1;
     } else if (WIFSIGNALED(status)) {
-        fprintf(stderr, "[!] Process killed by signal %d\n", WTERMSIG(status));
+        fprintf(stderr, "[!] Thread %d killed by signal %d\n", inj_tid, WTERMSIG(status));
         free(all_tids);
         return -1;
     } else {
@@ -522,8 +833,8 @@ static int syringe_inject_at(pid_t pid, const char *abs_path,
 
     /* ── Restore original memory and registers ── */
     remote_write_bytes(pid, inject_addr, orig_mem, sc_len);
-    if (syringe_arch_setregs(pid, &regs_orig) < 0) {
-        INJ_ERR("ptrace SETREGS (restore): %s", strerror(errno));
+    if (syringe_arch_setregs(inj_tid, &regs_orig) < 0) {
+        INJ_ERR("ptrace SETREGS (restore, tid %d): %s", inj_tid, strerror(errno));
         rc = -1;
     } else {
         INJ_OK("Original state restored (RIP=0x%lx)",
@@ -562,7 +873,8 @@ static unsigned long resolve_remote_dlopen(pid_t pid) {
     return addr;
 }
 
-int syringe_inject_with_retry(pid_t pid, const char *so_path, int max_retries) {
+int syringe_inject_with_retry(pid_t pid, const char *so_path,
+                               int max_retries, int retry_delay_ms) {
     /* ── 1. Resolve absolute path ── */
     char abs_path[PATH_MAX];
     if (!realpath(so_path, abs_path)) {
@@ -600,6 +912,15 @@ int syringe_inject_with_retry(pid_t pid, const char *so_path, int max_retries) {
                 attempts, n_regions);
     }
 
+    /* thread_wait_ms: how long to wait (per attempt) for a thread to exit
+     * a blocking syscall before giving up on that region. Set to 10× the
+     * retry delay so each region attempt gets a fair chance to catch a
+     * thread off-syscall before moving on. Default 500ms is enough for
+     * most event-loop apps (they cycle through syscalls every few ms). */
+    int thread_wait_ms = retry_delay_ms * 10;
+    if (thread_wait_ms < 100) thread_wait_ms = 100;  /* floor: 100ms */
+    if (thread_wait_ms > 2000) thread_wait_ms = 2000; /* ceiling: 2s */
+
     /* ── 4. Try each region ── */
     for (size_t i = 0; i < attempts; i++) {
         INJ_LOG("Attempt %zu/%zu: region 0x%lx-0x%lx (%s)",
@@ -607,21 +928,31 @@ int syringe_inject_with_retry(pid_t pid, const char *so_path, int max_retries) {
                 regions[i].name[0] ? regions[i].name : "anonymous");
 
         int rc = syringe_inject_at(pid, abs_path, dlopen_addr,
-                                    regions[i].start, regions[i].name);
+                                    regions[i].start, regions[i].name,
+                                    thread_wait_ms);
         if (rc == 0) {
             free(regions);
             return 0;  /* success! */
+        }
+
+        /* rc == -2 means EPERM — target has anti-debug protection.
+         * No point trying more regions, abort immediately. */
+        if (rc == -2) {
+            INJ_ERR("Anti-debug protection detected — aborting retry loop "
+                    "(attempted %zu/%zu regions)", i + 1, attempts);
+            free(regions);
+            return -1;
         }
 
         INJ_LOG("Region 0x%lx failed, %s",
                 regions[i].start,
                 (i + 1 < attempts) ? "trying next" : "no more regions to try");
 
-        /* Brief delay between attempts to let the target recover from
-         * any partial state. 100ms is enough for the kernel to clean up
-         * ptrace state without being noticeable to the user. */
-        if (i + 1 < attempts) {
-            usleep(100000);
+        /* Delay between attempts to let the target recover from any
+         * partial ptrace state. Default 100ms is enough for the kernel
+         * to clean up without being noticeable to the user. */
+        if (i + 1 < attempts && retry_delay_ms > 0) {
+            usleep(retry_delay_ms * 1000);
         }
     }
 
@@ -631,13 +962,19 @@ int syringe_inject_with_retry(pid_t pid, const char *so_path, int max_retries) {
 }
 
 int syringe_inject(pid_t pid, const char *so_path) {
-    /* Default behavior: try the first executable region only.
-     * This matches the pre-retry behavior — single attempt, main binary
-     * text segment (which find_all_maps returns first, since /proc/maps
-     * is sorted by address).
+    /* Default behavior: try up to 3 regions with 100ms delay between
+     * attempts. This handles most cases without the 66s+ hang of
+     * unlimited retries on apps with many regions (e.g., osu! AppImage
+     * has 666 executable regions).
      *
-     * Callers that want multi-region retry should call
-     * syringe_inject_with_retry directly with max_retries=-1 (all regions)
-     * or a specific count. */
-    return syringe_inject_with_retry(pid, so_path, 1);
+     * The thread-wait logic in syringe_inject_at handles the common
+     * "all threads in syscall" case by waiting up to 1s for a thread to
+     * exit, so we rarely need more than 1-2 region attempts.
+     *
+     * Callers that want different behavior should call
+     * syringe_inject_with_retry directly:
+     *   syringe_inject_with_retry(pid, so, -1, 100)  // all regions
+     *   syringe_inject_with_retry(pid, so, 1, 0)     // single attempt, no wait
+     */
+    return syringe_inject_with_retry(pid, so_path, 3, 100);
 }

@@ -37,13 +37,16 @@ static void print_usage(const char *prog) {
         "Options:\n"
         "  -q, --quiet       Suppress all output except errors\n"
         "  -r, --retry N     Try up to N executable regions on failure\n"
-        "                    (default: 1 = first region only)\n"
-        "                    Use -1 or 'all' to try every region\n\n"
+        "                    (default: 3)\n"
+        "                    Use -1 or 'all' to try every region\n"
+        "  -d, --delay MS    Delay between region attempts in ms (default: 100)\n"
+        "                    Also sets thread-wait timeout (10x this value)\n\n"
         "Examples:\n"
         "  syringe-cli 10024 ./liboverlay.so\n"
         "  syringe-cli --quiet 10024 /usr/local/lib/libhook.so\n"
         "  syringe-cli --retry all 10024 ./liboverlay.so   # try every region\n"
-        "  syringe-cli -r 5 10024 ./liboverlay.so          # try up to 5 regions\n\n"
+        "  syringe-cli -r 5 10024 ./liboverlay.so          # try up to 5 regions\n"
+        "  syringe-cli -r 1 -d 500 10024 ./lib.so          # 1 region, 500ms wait\n\n"
         "Notes:\n"
         "  - Run as root, or with the same UID as the target process\n"
         "  - Requires ptrace_scope <= 1 "
@@ -57,7 +60,8 @@ static void print_usage(const char *prog) {
 
 /* ── quiet mode flag ───────────────────────────────────────────────────── */
 static int quiet_mode = 0;
-static int retry_count = 1;  /* default: try first region only */
+static int retry_count = 3;     /* default: try up to 3 regions */
+static int retry_delay_ms = 100; /* default: 100ms between attempts */
 FILE *original_stderr = NULL;
 
 static void setup_quiet_mode(void) {
@@ -94,6 +98,14 @@ int main(int argc, char *argv[]) {
                 if (retry_count < -1) retry_count = -1;
             }
             arg_idx += 2;
+        } else if (strcmp(argv[arg_idx], "-d") == 0 || strcmp(argv[arg_idx], "--delay") == 0) {
+            if (arg_idx + 1 >= argc) {
+                fprintf(stderr, "[!] --delay requires an argument (ms)\n");
+                return 1;
+            }
+            retry_delay_ms = atoi(argv[arg_idx + 1]);
+            if (retry_delay_ms < 0) retry_delay_ms = 0;
+            arg_idx += 2;
         } else {
             break;
         }
@@ -122,7 +134,7 @@ int main(int argc, char *argv[]) {
     }
 
     setup_quiet_mode();
-    int ret = syringe_inject_with_retry(pid, so_path, retry_count);
+    int ret = syringe_inject_with_retry(pid, so_path, retry_count, retry_delay_ms);
     restore_quiet_mode();
 
     return (ret == 0) ? 0 : 1;

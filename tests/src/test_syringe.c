@@ -17,21 +17,19 @@
  */
 
 #define _GNU_SOURCE
+#include <assert.h>
+#include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
-#include <assert.h>
-#include <stdarg.h>
 #include <sys/ptrace.h>
 
 #include "syringe.h"
 
 /* Internal helper — not in public header, declared here for testing only */
-extern size_t syringe_build_shellcode(unsigned char *buf, size_t bufsz,
-                                       unsigned long dlopen_addr,
-                                       const char *so_path,
-                                       unsigned long inject_addr);
+extern size_t syringe_build_shellcode(unsigned char *buf, size_t bufsz, unsigned long dlopen_addr, const char *so_path,
+                                      unsigned long inject_addr);
 
 /* ── assertion helpers ─────────────────────────────────────────────────── */
 
@@ -40,238 +38,257 @@ static int tests_pass = 0;
 static int tests_fail = 0;
 
 static void check(int cond, const char *msg) {
-    tests_run++;
-    if (cond) {
-        tests_pass++;
-        printf("  PASS: %s\n", msg);
-    } else {
-        tests_fail++;
-        fprintf(stderr, "FAIL: %s:%d: %s\n", __FILE__, __LINE__, msg);
-    }
+  tests_run++;
+  if (cond) {
+    tests_pass++;
+    printf("  PASS: %s\n", msg);
+  } else {
+    tests_fail++;
+    fprintf(stderr, "FAIL: %s:%d: %s\n", __FILE__, __LINE__, msg);
+  }
 }
 
 /* ── Shellcode building (link against libinjector.so) ──────────────────── */
 
-#define RTLD_NOW_GLOBAL  0x102
+#define RTLD_NOW_GLOBAL 0x102
 
 static void check_fmt(int cond, const char *fmt, ...) {
-    char msg[256];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(msg, sizeof(msg), fmt, ap);
-    va_end(ap);
-    check(cond, msg);
+  char msg[256];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(msg, sizeof(msg), fmt, ap);
+  va_end(ap);
+  check(cond, msg);
 }
 
 /* ── tests: argument validation ────────────────────────────────────────── */
 
 static int validate_pid(const char *pid_str) {
-    long pid = strtol(pid_str, NULL, 10);
-    return pid > 0 && pid < 4194304;
+  long pid = strtol(pid_str, NULL, 10);
+  return pid > 0 && pid < 4194304;
 }
 
 static void test_validate_pid(void) {
-    printf("\n[validate_pid]\n");
+  printf("\n[validate_pid]\n");
 
-    check(validate_pid("1"), "PID 1 (init) is valid");
-    check(validate_pid("12345"), "PID 12345 is valid");
-    check(!validate_pid("0"), "PID 0 is invalid");
-    check(!validate_pid("-1"), "PID -1 is invalid");
-    check(!validate_pid("abc"), "PID 'abc' is invalid");
+  check(validate_pid("1"), "PID 1 (init) is valid");
+  check(validate_pid("12345"), "PID 12345 is valid");
+  check(!validate_pid("0"), "PID 0 is invalid");
+  check(!validate_pid("-1"), "PID -1 is invalid");
+  check(!validate_pid("abc"), "PID 'abc' is invalid");
 }
 
 /* ── tests: build_shellcode size ───────────────────────────────────────── */
 
 static void test_shellcode_size(void) {
-    printf("\n[shellcode size]\n");
+  printf("\n[shellcode size]\n");
 
-    unsigned char buf[512];
-    memset(buf, 0, sizeof(buf));
+  unsigned char buf[512];
+  memset(buf, 0, sizeof(buf));
 
-    size_t sz = syringe_build_shellcode(buf, sizeof(buf), 0x7F0000001000UL,
-                                       "/tmp/test.so", 0);
-    check(sz > 0, "syringe_build_shellcode returns valid size");
-    check(sz < sizeof(buf), "shellcode fits in 512 bytes");
-    printf("  shellcode size: %zu bytes\n", sz);
+  size_t sz = syringe_build_shellcode(buf, sizeof(buf), 0x7F0000001000UL, "/tmp/test.so", 0);
+  check(sz > 0, "syringe_build_shellcode returns valid size");
+  check(sz < sizeof(buf), "shellcode fits in 512 bytes");
+  printf("  shellcode size: %zu bytes\n", sz);
 }
 
 /* ── tests: shellcode starts with NOPs ─────────────────────────────────── */
 
 static void test_shellcode_entry_nops(void) {
-    printf("\n[shellcode entry NOPs]\n");
+  printf("\n[shellcode entry NOPs]\n");
 
-    unsigned char buf[512];
-    memset(buf, 0, sizeof(buf));
+  unsigned char buf[512];
+  memset(buf, 0, sizeof(buf));
 
-    size_t sz = syringe_build_shellcode(buf, sizeof(buf), 0x7F0000001000UL,
-                                       "/tmp/test.so", 0);
-    if (sz == 0) { printf("  SKIP: build failed\n"); return; }
+  size_t sz = syringe_build_shellcode(buf, sizeof(buf), 0x7F0000001000UL, "/tmp/test.so", 0);
+  if (sz == 0) {
+    printf("  SKIP: build failed\n");
+    return;
+  }
 
-    check(buf[0] == 0x90, "first byte is NOP");
-    check(buf[1] == 0x90, "second byte is NOP");
+  check(buf[0] == 0x90, "first byte is NOP");
+  check(buf[1] == 0x90, "second byte is NOP");
 }
 
 /* ── tests: shellcode contains int3 (SIGTRAP) ──────────────────────────── */
 
 static void test_shellcode_contains_int3(void) {
-    printf("\n[shellcode contains SIGTRAP]\n");
+  printf("\n[shellcode contains SIGTRAP]\n");
 
-    unsigned char buf[512];
-    memset(buf, 0, sizeof(buf));
+  unsigned char buf[512];
+  memset(buf, 0, sizeof(buf));
 
-    size_t sz = syringe_build_shellcode(buf, sizeof(buf), 0x7F0000001000UL,
-                                       "/tmp/test.so", 0);
-    if (sz == 0) { printf("  SKIP: build failed\n"); return; }
+  size_t sz = syringe_build_shellcode(buf, sizeof(buf), 0x7F0000001000UL, "/tmp/test.so", 0);
+  if (sz == 0) {
+    printf("  SKIP: build failed\n");
+    return;
+  }
 
-    int found = 0;
-    for (size_t i = 0; i < sz; i++) {
-        if (buf[i] == 0xCC) { found = 1; break; }
+  int found = 0;
+  for (size_t i = 0; i < sz; i++) {
+    if (buf[i] == 0xCC) {
+      found = 1;
+      break;
     }
-    check(found, "shellcode contains INT3 (SIGTRAP)");
+  }
+  check(found, "shellcode contains INT3 (SIGTRAP)");
 }
 
 /* ── tests: shellcode embeds .so path ──────────────────────────────────── */
 
 static void test_shellcode_embeds_path(void) {
-    printf("\n[shellcode embeds .so path]\n");
+  printf("\n[shellcode embeds .so path]\n");
 
-    unsigned char buf[512];
-    memset(buf, 0, sizeof(buf));
+  unsigned char buf[512];
+  memset(buf, 0, sizeof(buf));
 
-    const char *test_path = "/usr/local/lib/mylib.so";
-    size_t sz = syringe_build_shellcode(buf, sizeof(buf), 0x7F0000001000UL,
-                                       test_path, 0);
-    if (sz == 0) { printf("  SKIP: build failed\n"); return; }
+  const char *test_path = "/usr/local/lib/mylib.so";
+  size_t sz = syringe_build_shellcode(buf, sizeof(buf), 0x7F0000001000UL, test_path, 0);
+  if (sz == 0) {
+    printf("  SKIP: build failed\n");
+    return;
+  }
 
-    int found = 0;
-    for (size_t i = 0; i + strlen(test_path) < sz; i++) {
-        if (memcmp(buf + i, test_path, strlen(test_path) + 1) == 0) {
-            found = 1; break;
-        }
+  int found = 0;
+  for (size_t i = 0; i + strlen(test_path) < sz; i++) {
+    if (memcmp(buf + i, test_path, strlen(test_path) + 1) == 0) {
+      found = 1;
+      break;
     }
-    check(found, ".so path embedded in shellcode");
+  }
+  check(found, ".so path embedded in shellcode");
 }
 
 /* ── tests: shellcode contains mov esi, RTLD_NOW_GLOBAL ────────────────── */
 
 static void test_shellcode_mov_rsi(void) {
-    printf("\n[shellcode mov esi]\n");
+  printf("\n[shellcode mov esi]\n");
 
-    unsigned char buf[512];
-    memset(buf, 0, sizeof(buf));
+  unsigned char buf[512];
+  memset(buf, 0, sizeof(buf));
 
-    size_t sz = syringe_build_shellcode(buf, sizeof(buf), 0x7F0000001000UL,
-                                       "/tmp/test.so", 0);
-    if (sz == 0) { printf("  SKIP: build failed\n"); return; }
+  size_t sz = syringe_build_shellcode(buf, sizeof(buf), 0x7F0000001000UL, "/tmp/test.so", 0);
+  if (sz == 0) {
+    printf("  SKIP: build failed\n");
+    return;
+  }
 
-    /* Optimized encoding: `mov $0x102, %esi` = 0xBE imm32 (5 bytes total).
-     * Old `movabs $0x102, %rsi` = 0x48 0xBE imm64 (10 bytes) was dropped in
-     * favor of the 5-byte form because 0x102 fits in 32 bits and zero-extends. */
-    int found = 0;
-    for (size_t i = 0; i + 5 <= sz; i++) {
-        if (buf[i] == 0xBE) {
-            uint32_t imm;
-            memcpy(&imm, buf + i + 1, 4);
-            if (imm == RTLD_NOW_GLOBAL) { found = 1; break; }
-        }
+  /* Optimized encoding: `mov $0x102, %esi` = 0xBE imm32 (5 bytes total).
+   * Old `movabs $0x102, %rsi` = 0x48 0xBE imm64 (10 bytes) was dropped in
+   * favor of the 5-byte form because 0x102 fits in 32 bits and zero-extends. */
+  int found = 0;
+  for (size_t i = 0; i + 5 <= sz; i++) {
+    if (buf[i] == 0xBE) {
+      uint32_t imm;
+      memcpy(&imm, buf + i + 1, 4);
+      if (imm == RTLD_NOW_GLOBAL) {
+        found = 1;
+        break;
+      }
     }
-    check(found, "shellcode contains 'mov esi, RTLD_NOW_GLOBAL'");
+  }
+  check(found, "shellcode contains 'mov esi, RTLD_NOW_GLOBAL'");
 }
 
 /* ── tests: shellcode contains call rax ─────────────────────────────────── */
 
 static void test_shellcode_call_rax(void) {
-    printf("\n[shellcode call rax]\n");
+  printf("\n[shellcode call rax]\n");
 
-    unsigned char buf[512];
-    memset(buf, 0, sizeof(buf));
+  unsigned char buf[512];
+  memset(buf, 0, sizeof(buf));
 
-    size_t sz = syringe_build_shellcode(buf, sizeof(buf), 0x7F0000001000UL,
-                                       "/tmp/test.so", 0);
-    if (sz == 0) { printf("  SKIP: build failed\n"); return; }
+  size_t sz = syringe_build_shellcode(buf, sizeof(buf), 0x7F0000001000UL, "/tmp/test.so", 0);
+  if (sz == 0) {
+    printf("  SKIP: build failed\n");
+    return;
+  }
 
-    int found = 0;
-    for (size_t i = 0; i + 1 < sz; i++) {
-        if (buf[i] == 0xFF && buf[i + 1] == 0xD0) { found = 1; break; }
+  int found = 0;
+  for (size_t i = 0; i + 1 < sz; i++) {
+    if (buf[i] == 0xFF && buf[i + 1] == 0xD0) {
+      found = 1;
+      break;
     }
-    check(found, "shellcode contains 'call rax'");
+  }
+  check(found, "shellcode contains 'call rax'");
 }
 
 /* ── tests: shellcode ends with ret ────────────────────────────────────── */
 
 static void test_shellcode_ends_with_ret(void) {
-    printf("\n[shellcode ends with ret]\n");
+  printf("\n[shellcode ends with ret]\n");
 
-    unsigned char buf[512];
-    memset(buf, 0, sizeof(buf));
+  unsigned char buf[512];
+  memset(buf, 0, sizeof(buf));
 
-    const char *test_path = "/tmp/test.so";
-    size_t sz = syringe_build_shellcode(buf, sizeof(buf), 0x7F0000001000UL,
-                                       test_path, 0);
-    if (sz == 0) { printf("  SKIP: build failed\n"); return; }
+  const char *test_path = "/tmp/test.so";
+  size_t sz = syringe_build_shellcode(buf, sizeof(buf), 0x7F0000001000UL, test_path, 0);
+  if (sz == 0) {
+    printf("  SKIP: build failed\n");
+    return;
+  }
 
-    /* Shellcode has fixed layout: code + 256-byte path buffer.
-     * RET is at offset 0x37 (after caller-saved-only save/restore optimization).
-     * Was 0x50 when all 15 GPRs + flags were saved. */
-    size_t ret_pos = 0x37;  /* offset of RET in compiled shellcode */
-    check(buf[ret_pos] == 0xC3, "shellcode has RET at expected offset");
+  /* Shellcode has fixed layout: code + 256-byte path buffer.
+   * RET is at offset 0x37 (after caller-saved-only save/restore optimization).
+   * Was 0x50 when all 15 GPRs + flags were saved. */
+  size_t ret_pos = 0x37; /* offset of RET in compiled shellcode */
+  check(buf[ret_pos] == 0xC3, "shellcode has RET at expected offset");
 }
 
 /* ── tests: shellcode buffer overflow protection ───────────────────────── */
 
 static void test_shellcode_buffer_overflow(void) {
-    printf("\n[shellcode buffer overflow]\n");
+  printf("\n[shellcode buffer overflow]\n");
 
-    unsigned char buf[16];
-    memset(buf, 0, sizeof(buf));
+  unsigned char buf[16];
+  memset(buf, 0, sizeof(buf));
 
-    size_t sz = syringe_build_shellcode(buf, sizeof(buf), 0x7F0000001000UL,
-                                       "/tmp/test.so", 0);
-    check(sz == 0, "overflow detected (build returns 0)");
+  size_t sz = syringe_build_shellcode(buf, sizeof(buf), 0x7F0000001000UL, "/tmp/test.so", 0);
+  check(sz == 0, "overflow detected (build returns 0)");
 }
 
 /* ── tests: shellcode with different dlopen addresses ──────────────────── */
 
 static void test_shellcode_various_dlopen_addrs(void) {
-    printf("\n[shellcode various dlopen addresses]\n");
+  printf("\n[shellcode various dlopen addresses]\n");
 
-    unsigned char buf[512];
+  unsigned char buf[512];
 
-    unsigned long addrs[] = {
-        0x7F0000001000UL,
-        0x00007F0000001000UL,
-        0xFFFFFFFFFFFFFFFFUL,
-        0x0000000000000000UL,
-    };
+  unsigned long addrs[] = {
+      0x7F0000001000UL,
+      0x00007F0000001000UL,
+      0xFFFFFFFFFFFFFFFFUL,
+      0x0000000000000000UL,
+  };
 
-    for (int i = 0; i < 4; i++) {
-        memset(buf, 0, sizeof(buf));
-        size_t sz = syringe_build_shellcode(buf, sizeof(buf), addrs[i],
-                                           "/tmp/test.so", 0);
-        check_fmt(sz > 0, "shellcode builds for dlopen_addr 0x%lx", addrs[i]);
-    }
+  for (int i = 0; i < 4; i++) {
+    memset(buf, 0, sizeof(buf));
+    size_t sz = syringe_build_shellcode(buf, sizeof(buf), addrs[i], "/tmp/test.so", 0);
+    check_fmt(sz > 0, "shellcode builds for dlopen_addr 0x%lx", addrs[i]);
+  }
 }
 
 /* ── main ───────────────────────────────────────────────────────────────── */
 
 int main(void) {
-    printf("=== syringe unit tests ===\n");
+  printf("=== syringe unit tests ===\n");
 
-    test_validate_pid();
-    test_shellcode_size();
-    test_shellcode_entry_nops();
-    test_shellcode_contains_int3();
-    test_shellcode_embeds_path();
-    test_shellcode_mov_rsi();
-    test_shellcode_call_rax();
-    test_shellcode_ends_with_ret();
-    test_shellcode_buffer_overflow();
-    test_shellcode_various_dlopen_addrs();
+  test_validate_pid();
+  test_shellcode_size();
+  test_shellcode_entry_nops();
+  test_shellcode_contains_int3();
+  test_shellcode_embeds_path();
+  test_shellcode_mov_rsi();
+  test_shellcode_call_rax();
+  test_shellcode_ends_with_ret();
+  test_shellcode_buffer_overflow();
+  test_shellcode_various_dlopen_addrs();
 
-    printf("\n=== results ===\n");
-    printf("  run:   %d\n", tests_run);
-    printf("  pass:  %d\n", tests_pass);
-    printf("  fail:  %d\n", tests_fail);
+  printf("\n=== results ===\n");
+  printf("  run:   %d\n", tests_run);
+  printf("  pass:  %d\n", tests_pass);
+  printf("  fail:  %d\n", tests_fail);
 
-    return tests_fail > 0 ? 1 : 0;
+  return tests_fail > 0 ? 1 : 0;
 }

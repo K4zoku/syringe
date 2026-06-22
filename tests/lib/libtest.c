@@ -6,17 +6,15 @@
  * target process and triggers its constructor.
  */
 #define _GNU_SOURCE
+#include <dlfcn.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <unistd.h>
-#include <pthread.h>
-#include <dlfcn.h>
 
-__attribute__((constructor))
-static void libtest_init(void) {
-    fprintf(stderr, "[libtest] library loaded into pid %d!\n", getpid());
+__attribute__((constructor)) static void libtest_init(void) {
+  fprintf(stderr, "[libtest] library loaded into pid %d!\n", getpid());
 }
 
-__attribute__((destructor))
-static void libtest_fini(void) {
-    fprintf(stderr, "[libtest] library unloaded from pid %d\n", getpid());
+__attribute__((destructor)) static void libtest_fini(void) {
+  fprintf(stderr, "[libtest] library unloaded from pid %d\n", getpid());
 }

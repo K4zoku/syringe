@@ -18,12 +18,12 @@
 #ifndef SYRINGE_HOOK_TYPES_H
 #define SYRINGE_HOOK_TYPES_H
 
-#include <stdint.h>
-#include <stddef.h>
-#include <unistd.h>
 #include <errno.h>
-#include <string.h>
 #include <fcntl.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+#include <unistd.h>
 
 /* Trampoline struct — fields are arch-agnostic, but stolen[] size depends
  * on TRAMP_STOLEN_MAX which is defined by the arch header.
@@ -44,38 +44,38 @@
 #endif
 
 typedef struct {
-    uint8_t  stolen[TRAMP_STOLEN_MAX]; /* original prologue bytes */
-    size_t   stolen_len;               /* exact bytes overwritten on target */
-    void    *target;                   /* hooked function address */
-    uint8_t *bounce;                   /* mmap'd trampoline stub */
-    size_t   bounce_len;               /* size of bounce (for munmap) */
-    int      active;                   /* 1 if currently installed */
+  uint8_t stolen[TRAMP_STOLEN_MAX]; /* original prologue bytes */
+  size_t stolen_len;                /* exact bytes overwritten on target */
+  void *target;                     /* hooked function address */
+  uint8_t *bounce;                  /* mmap'd trampoline stub */
+  size_t bounce_len;                /* size of bounce (for munmap) */
+  int active;                       /* 1 if currently installed */
 } Trampoline;
 
 /* Forward declaration for WalkCtx (defined fully below) */
 typedef struct SyringeHookRecord SyringeHookRecord;
 
 struct SyringeHookRecord {
-    char  sym[128];
-    void *hook;
-    void **orig_out;
-    void  *orig_addr;
+  char sym[128];
+  void *hook;
+  void **orig_out;
+  void *orig_addr;
 
-    struct {
-        void **entry;
-        void  *saved;
-    } patches[64];
-    int npatch;
+  struct {
+    void **entry;
+    void *saved;
+  } patches[64];
+  int npatch;
 
-    Trampoline tramp;
-    int has_tramp;
+  Trampoline tramp;
+  int has_tramp;
 };
 
 typedef struct {
-    const char        *sym_name;
-    void              *hook;
-    SyringeHookRecord *rec;
-    int                count;
+  const char *sym_name;
+  void *hook;
+  SyringeHookRecord *rec;
+  int count;
 } WalkCtx;
 
 /* ── /proc/self/mem helpers ──────────────────────────────────────────────────
@@ -92,34 +92,37 @@ static int syringe_memfd = -1;
 /* SYRINGE_HOOK_LOG is defined in syringe_hook.h (the dispatcher) before
  * the arch header is included, so it's available here. */
 static inline void syringe_hook_memfd_open(void) {
-    if (syringe_memfd >= 0) return;
-    syringe_memfd = open("/proc/self/mem", O_RDWR);
-    if (syringe_memfd < 0)
-        SYRINGE_HOOK_LOG("warn: /proc/self/mem open failed: %s", strerror(errno));
+  if (syringe_memfd >= 0)
+    return;
+  syringe_memfd = open("/proc/self/mem", O_RDWR);
+  if (syringe_memfd < 0)
+    SYRINGE_HOOK_LOG("warn: /proc/self/mem open failed: %s", strerror(errno));
 }
 
 static inline int syringe_hook_mem_write(void *dst, const void *src, size_t len) {
-    if (syringe_memfd < 0) {
-        syringe_hook_memfd_open();
-    }
-    if (syringe_memfd < 0) return -1;
-    if (pwrite(syringe_memfd, src, len, (off_t)(uintptr_t)dst) != (ssize_t)len) {
-        SYRINGE_HOOK_LOG("pwrite /proc/self/mem @ %p failed: %s", dst, strerror(errno));
-        return -1;
-    }
-    return 0;
+  if (syringe_memfd < 0) {
+    syringe_hook_memfd_open();
+  }
+  if (syringe_memfd < 0)
+    return -1;
+  if (pwrite(syringe_memfd, src, len, (off_t)(uintptr_t)dst) != (ssize_t)len) {
+    SYRINGE_HOOK_LOG("pwrite /proc/self/mem @ %p failed: %s", dst, strerror(errno));
+    return -1;
+  }
+  return 0;
 }
 
 static inline int syringe_hook_mem_read(void *dst, void *src, size_t len) {
-    if (syringe_memfd < 0) {
-        syringe_hook_memfd_open();
-    }
-    if (syringe_memfd < 0) return -1;
-    if (pread(syringe_memfd, dst, len, (off_t)(uintptr_t)src) != (ssize_t)len) {
-        SYRINGE_HOOK_LOG("pread /proc/self/mem @ %p failed: %s", src, strerror(errno));
-        return -1;
-    }
-    return 0;
+  if (syringe_memfd < 0) {
+    syringe_hook_memfd_open();
+  }
+  if (syringe_memfd < 0)
+    return -1;
+  if (pread(syringe_memfd, dst, len, (off_t)(uintptr_t)src) != (ssize_t)len) {
+    SYRINGE_HOOK_LOG("pread /proc/self/mem @ %p failed: %s", src, strerror(errno));
+    return -1;
+  }
+  return 0;
 }
 
 #endif /* SYRINGE_HOOK_TYPES_H */

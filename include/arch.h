@@ -22,8 +22,8 @@
 #ifndef SYRINGE_ARCH_H
 #define SYRINGE_ARCH_H
 
-#include <stddef.h>      /* size_t, max_align_t */
-#include <sys/types.h>   /* pid_t */
+#include <stddef.h>    /* size_t, max_align_t */
+#include <sys/types.h> /* pid_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -40,10 +40,10 @@ extern "C" {
 /* Opaque register storage. Arch backends memcpy the _buf member to/from
  * their native ptrace reg struct; the core never inspects the contents. */
 typedef struct SyringeArchRegs {
-    union {
-        unsigned char _buf[SYRINGE_ARCH_REGS_MAX];
-        max_align_t   _align;   /* guarantee suitable alignment for any regs */
-    } _u;
+  union {
+    unsigned char _buf[SYRINGE_ARCH_REGS_MAX];
+    max_align_t _align; /* guarantee suitable alignment for any regs */
+  } _u;
 } SyringeArchRegs;
 
 /*
@@ -56,10 +56,8 @@ typedef struct SyringeArchRegs {
  * @param inject_addr  target injection address (for PC-relative fixups)
  * @return             shellcode size in bytes, or 0 on overflow / unsupported
  */
-size_t syringe_arch_build_shellcode(unsigned char *buf, size_t bufsz,
-                                     unsigned long dlopen_addr,
-                                     const char *so_path,
-                                     unsigned long inject_addr);
+size_t syringe_arch_build_shellcode(unsigned char *buf, size_t bufsz, unsigned long dlopen_addr, const char *so_path,
+                                    unsigned long inject_addr);
 
 /*
  * Read / write the target's full integer register set.
@@ -72,7 +70,7 @@ int syringe_arch_setregs(pid_t pid, const SyringeArchRegs *regs);
 
 /* Get / set the program counter. */
 unsigned long syringe_arch_get_pc(const SyringeArchRegs *regs);
-void          syringe_arch_set_pc(SyringeArchRegs *regs, unsigned long pc);
+void syringe_arch_set_pc(SyringeArchRegs *regs, unsigned long pc);
 
 /* Get the stack pointer (diagnostics only). */
 unsigned long syringe_arch_get_sp(const SyringeArchRegs *regs);

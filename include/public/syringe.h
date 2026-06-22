@@ -83,8 +83,7 @@ int syringe_inject(pid_t pid, const char *so_path);
  *                       on multithreaded targets). 100 is a good default.
  * @return               0 on success, -1 if all attempts failed
  */
-int syringe_inject_with_retry(pid_t pid, const char *so_path,
-                               int max_retries, int retry_delay_ms);
+int syringe_inject_with_retry(pid_t pid, const char *so_path, int max_retries, int retry_delay_ms);
 
 /* ── Verbose logging control ──────────────────────────────────────────────
  *

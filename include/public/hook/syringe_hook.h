@@ -30,20 +30,20 @@
 #warning "syringe_hook: _GNU_SOURCE not defined — define it before including this header"
 #endif
 
+#include <dlfcn.h>
+#include <elf.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <link.h> /* struct dl_phdr_info for syringe_hook_phdr_cb */
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <errno.h>
-#include <fcntl.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
-#include <elf.h>
-#include <link.h>      /* struct dl_phdr_info for syringe_hook_phdr_cb */
-#include <dlfcn.h>
+#include <unistd.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -59,11 +59,11 @@ extern "C" {
 #include <stdarg.h>
 
 static void syringe_hook_log_real(const char *fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
-    va_end(ap);
-    fflush(stderr);
+  va_list ap;
+  va_start(ap, fmt);
+  vfprintf(stderr, fmt, ap);
+  va_end(ap);
+  fflush(stderr);
 }
 
 static void syringe_hook_log_nop(const char *fmt, ...) { (void)fmt; }
@@ -72,17 +72,18 @@ static void (*syringe_hook_log_fn)(const char *fmt, ...) = syringe_hook_log_nop;
 static int syringe_hook_log_ready = 0;
 
 static inline void syringe_hook_log_init(void) {
-    syringe_hook_log_ready = 1;
-    const char *e = getenv("SYRINGE_HOOK_DEBUG");
-    if (e && e[0] != '\0')
-        syringe_hook_log_fn = syringe_hook_log_real;
+  syringe_hook_log_ready = 1;
+  const char *e = getenv("SYRINGE_HOOK_DEBUG");
+  if (e && e[0] != '\0')
+    syringe_hook_log_fn = syringe_hook_log_real;
 }
 
-#define SYRINGE_HOOK_LOG(fmt, ...) \
-    do { \
-        if (!syringe_hook_log_ready) syringe_hook_log_init(); \
-        syringe_hook_log_fn("[syringe_hook] " fmt "\n", ##__VA_ARGS__); \
-    } while (0)
+#define SYRINGE_HOOK_LOG(fmt, ...)                                                                                     \
+  do {                                                                                                                 \
+    if (!syringe_hook_log_ready)                                                                                       \
+      syringe_hook_log_init();                                                                                         \
+    syringe_hook_log_fn("[syringe_hook] " fmt "\n", ##__VA_ARGS__);                                                    \
+  } while (0)
 #endif
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -99,35 +100,43 @@ static inline void syringe_hook_log_init(void) {
  * See include/hook/arch/syringe_hook_arch.h for the contract.
  */
 #if defined(__x86_64__) && defined(__LP64__)
-  #include "arch/syringe_hook_x86_64.h"
+#include "arch/syringe_hook_x86_64.h"
 #elif defined(__aarch64__)
-  #include "arch/syringe_hook_aarch64.h"
+#include "arch/syringe_hook_aarch64.h"
 #elif defined(__arm__)
-  #include "arch/syringe_hook_arm.h"
+#include "arch/syringe_hook_arm.h"
 #elif defined(__riscv) && __riscv_xlen == 64
-  #include "arch/syringe_hook_riscv64.h"
+#include "arch/syringe_hook_riscv64.h"
 #else
-  #warning "syringe_hook: unsupported architecture — only GOT/PLT patching will work"
-  /* Provide stubs so the common code compiles. tramp_install will fail
-   * gracefully and install() will fall back to GOT-only mode. */
-  #define TRAMP_JMP_SZ     16
-  #define TRAMP_STOLEN_MAX 32
-  #define TRAMP_BOUNCE_MAX (TRAMP_STOLEN_MAX + TRAMP_JMP_SZ)
-  #define BOUNCE_SZ        TRAMP_BOUNCE_MAX
-  #include "syringe_hook_types.h"
-  static inline void syringe_hook_arch_build_jmp(uint8_t *buf, void *dest) {
-    (void)buf; (void)dest;
-  }
-  static inline size_t syringe_hook_arch_disasm(const uint8_t *code, int *reloc) {
-    (void)code; (void)reloc; return 0;
-  }
-  static inline size_t syringe_hook_arch_tramp_make(uint8_t *b, size_t c,
-                                                     const void *t, size_t *cp) {
-    (void)b; (void)c; (void)t; (void)cp; return 0;
-  }
-  static inline int syringe_hook_arch_atomic_patch_jmp(void *t, const uint8_t *j) {
-    (void)t; (void)j; return -1;
-  }
+#warning "syringe_hook: unsupported architecture — only GOT/PLT patching will work"
+/* Provide stubs so the common code compiles. tramp_install will fail
+ * gracefully and install() will fall back to GOT-only mode. */
+#define TRAMP_JMP_SZ 16
+#define TRAMP_STOLEN_MAX 32
+#define TRAMP_BOUNCE_MAX (TRAMP_STOLEN_MAX + TRAMP_JMP_SZ)
+#define BOUNCE_SZ TRAMP_BOUNCE_MAX
+#include "syringe_hook_types.h"
+static inline void syringe_hook_arch_build_jmp(uint8_t *buf, void *dest) {
+  (void)buf;
+  (void)dest;
+}
+static inline size_t syringe_hook_arch_disasm(const uint8_t *code, int *reloc) {
+  (void)code;
+  (void)reloc;
+  return 0;
+}
+static inline size_t syringe_hook_arch_tramp_make(uint8_t *b, size_t c, const void *t, size_t *cp) {
+  (void)b;
+  (void)c;
+  (void)t;
+  (void)cp;
+  return 0;
+}
+static inline int syringe_hook_arch_atomic_patch_jmp(void *t, const uint8_t *j) {
+  (void)t;
+  (void)j;
+  return -1;
+}
 #endif
 
 /* ══════════════════════════════════════════════════════════════════════════

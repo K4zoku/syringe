@@ -4,7 +4,10 @@
 
 | Function | Description |
 |----------|-------------|
-| `syringe_inject(pid, so_path)` | Inject `.so` into process via ptrace + dlopen. Returns 0 on success, -1 on failure. |
+| `syringe_inject(pid, so_path)` | Inject `.so` into process via ptrace + dlopen. Auto-detects .NET processes and uses AttachProfiler IPC. Returns 0 on success, -1 on failure. |
+| `syringe_inject_with_retry(pid, so_path, max_retries, retry_delay_ms)` | Same as `syringe_inject`, but retries on the next executable region from `/proc/<pid>/maps` if the first fails (SIGSEGV, EACCES, etc.). Supports configurable retry delay and thread-wait logic. |
+| `syringe_inject_dotnet(pid, so_path)` | Inject `.so` into a .NET CoreCLR process via AttachProfiler IPC (no ptrace). Loads `libsyringe-dotnet-profiler.so` into the target, which dlopen's the requested `.so`. Bypasses anti-debug protections. Returns 0 on success, -1 (error), -2 (.NET rejected), or -3 (no diagnostic socket). |
+| `syringe_dotnet_find_socket(pid, out_socket, socket_size)` | Check whether a .NET diagnostic socket exists for the given PID. Useful for auto-detecting .NET processes before injection. Returns 0 if socket found, -1 otherwise. |
 
 > `syringe_build_shellcode` exists as an internal helper in `libsyringe.so` but is **NOT declared in `syringe.h`**. Most callers should use `syringe_inject()`. If you genuinely need to drive ptrace yourself, you can `extern`-declare it (see `tests/src/test_syringe.c`).
 

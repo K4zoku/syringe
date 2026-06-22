@@ -13,9 +13,10 @@ meson compile -C build
 meson test -C build -v
 ```
 
-Two test suites:
+Three test suites:
 - `test_syringe` — links `libsyringe.so`, tests `syringe_inject` + internal `syringe_build_shellcode`
 - `test_hook` — header-only, `#include <syringe/hook/syringe_hook.h>`, tests `syringe_hook_*`
+- `test_inline` — end-to-end inline hook test with CET (`-fcf-protection=full`), tests trampoline install/remove, RIP-relative fixup, and hook detection
 
 ## Cross-compiling for aarch64
 
@@ -93,3 +94,9 @@ echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
 ```
 
 > **Warning:** This weakens system-wide ptrace security. Revert afterward:
+
+```bash
+sudo sysctl kernel.yama.ptrace_scope=1
+# or equivalently:
+echo 1 | sudo tee /proc/sys/kernel/yama/ptrace_scope
+```

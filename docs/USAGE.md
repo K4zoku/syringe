@@ -29,6 +29,46 @@ int main(void) {
 gcc -D_GNU_SOURCE injector.c -o injector $(pkg-config --cflags --libs libsyringe)
 ```
 
+### Multi-region retry
+
+For hard targets (e.g. games with W^X enforcement, Wayland apps), use `syringe_inject_with_retry()`:
+
+```c
+#define _GNU_SOURCE
+#include "syringe.h"
+
+int main(void) {
+    int rc = syringe_inject_with_retry(1234, "/path/to/lib.so", 3, 100);
+    /* max_retries=3 → tries up to 3 executable regions from /proc/<pid>/maps
+     * retry_delay_ms=100 → 100ms between attempts, 1s thread-wait timeout */
+    return rc == 0 ? 0 : 1;
+}
+```
+
+### .NET CoreCLR injection (AttachProfiler)
+
+For .NET processes with anti-debug protections, syringe auto-detects the .NET diagnostic socket and uses AttachProfiler IPC instead of ptrace. You can also call it manually:
+
+```c
+#define _GNU_SOURCE
+#include "syringe.h"
+
+int main(void) {
+    /* Auto-detects: syringe_inject() calls this internally if a .NET socket exists */
+    int rc = syringe_inject_dotnet(1234, "/path/to/lib.so");
+    return rc == 0 ? 0 : 1;
+}
+```
+
+The profiler `.so` (`libsyringe-dotnet-profiler.so`) is loaded by the .NET runtime via the Diagnostic Server socket (`/tmp/dotnet-diagnostic-{pid}-{key}-socket`), then dlopen's the requested `.so`. This bypasses `prctl(PR_SET_DUMPABLE)` and seccomp filters that block ptrace.
+
+To customize the profiler path:
+
+```bash
+export SYRINGE_PROFILER_PATH=/absolute/path/to/libsyringe-dotnet-profiler.so
+syringe-cli <pid> <library.so>
+```
+
 ## Hooking
 
 `syringe_hook.h` is **header-only** — no library to link. All functions are `static inline`.

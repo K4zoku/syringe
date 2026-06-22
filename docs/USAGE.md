@@ -1,20 +1,23 @@
 # Usage
 
-## Pattern 1: Inject a `.so` into a running process (CLI)
+## Injecting
+
+### Via CLI
+
+Inject a shared library into a running process:
 
 ```bash
 syringe-cli <pid> <library.so>
 
-# example
+# Example: inject libhook.so into PID 10024
 syringe-cli 10024 ./libhook.so
 ```
 
-## Pattern 2: Inject from your own C code
+### From C code
 
 ```c
 #define _GNU_SOURCE
 #include "syringe.h"
-#include <stdio.h>
 
 int main(void) {
     int rc = syringe_inject(1234, "/path/to/lib.so");
@@ -26,14 +29,17 @@ int main(void) {
 gcc -D_GNU_SOURCE injector.c -o injector $(pkg-config --cflags --libs libsyringe)
 ```
 
-## Pattern 3: Write a `.so` to be injected (header-only hooker)
+## Hooking
+
+`syringe_hook.h` is **header-only** — no library to link. All functions are `static inline`.
+
+### Writing an injectable `.so`
 
 ```c
-/* libhook.c — the ONLY .c file in libhook.so */
+/* libhook.c — include from exactly one .c file per .so */
 #define _GNU_SOURCE
 #include <syringe/hook/syringe_hook.h>
 #include <stdio.h>
-#include <unistd.h>
 #include <fcntl.h>
 #include <stdarg.h>
 
@@ -61,35 +67,27 @@ static void on_unload(void) {
 }
 ```
 
-Build — **just include the header, no link to libsyringe_hook**:
+**Build** — only the header is needed, no link step:
 
 ```bash
-# Option A: system install (recommended)
-sudo ninja -C build install    # one-time
-gcc -shared -fPIC -O2 -o libhook.so libhook.c \
-    -I/usr/local/include -ldl -lpthread
+# System install (run once):
+sudo ninja -C build install
 
-# Option B: vendored (copy header into your project tree)
-cp /path/to/syringe/include/hook/syringe_hook.h my_project/vendor/
-gcc -shared -fPIC -O2 -o libhook.so libhook.c \
-    -Imy_project/vendor -ldl -lpthread
-
-# Option C: meson subproject
-gcc -shared -fPIC -O2 -o libhook.so libhook.c \
-    -Isubprojects/syringe/include -ldl -lpthread
+# Then build your .so:
+gcc -shared -fPIC -O2 -o libhook.so libhook.c -I/usr/local/include -ldl -lpthread
 ```
 
-All three options produce identical binaries — the header is `static inline` so the compiler generates the same code regardless of where the header lives.
-
-Then inject:
+After building, inject as normal:
 
 ```bash
 syringe-cli <pid> ./libhook.so
 ```
 
-> **Single-TU rule:** Because `syringe/hook/syringe_hook.h` uses `static` registry, you MUST include it from **exactly one** `.c` file per `.so` / executable. The standard pattern above (1 `.c` file with constructor) is correct. Do not include `syringe/hook/syringe_hook.h` from multiple `.c` files in the same `.so` — each will get its own private registry and hooks won't be visible across files.
+> **Single-TU rule:** `syringe_hook.h` maintains a `static` registry. Include it from **exactly one** `.c` file per `.so`. Including it in multiple `.c` files gives each one a private registry, so hooks become invisible across files.
 
-## Pattern 4: App hooking itself (also header-only)
+### Hooking from the app itself
+
+You don't need a separate `.so` to hook your own process:
 
 ```c
 #define _GNU_SOURCE
@@ -105,7 +103,6 @@ static int my_open(const char *p, int f, ...) {
 
 int main(void) {
     syringe_hook_install("open", (void *)my_open, (void **)&orig_open);
-    /* every open() after this goes through my_open */
     int fd = orig_open("/etc/hostname", O_RDONLY);
     syringe_hook_remove_all();
     return 0;
@@ -116,20 +113,18 @@ int main(void) {
 gcc -D_GNU_SOURCE app.c -o app -I/usr/local/include -ldl -lpthread
 ```
 
-(No `-lsyringe` needed — only the header.)
+No `-lsyringe` — the hooker is entirely header-only.
 
-## Usage in another meson project
+## Embedding in another Meson project
 
-### Option 1: System install + pkg-config (for `libsyringe` only)
+### System install + pkg-config
 
 ```meson
+# libsyringe (for syringe_inject):
 syringe_dep = dependency('libsyringe', required: true)
 executable('my_injector', 'main.c', dependencies: [syringe_dep])
-```
 
-For `syringe/hook/syringe_hook.h`, just add the include path manually:
-
-```meson
+# Hooker (header-only):
 executable('my_hook_so', 'hook.c',
   include_directories: include_directories('/usr/local/include/syringe'),
   c_args: ['-D_GNU_SOURCE'],
@@ -137,9 +132,41 @@ executable('my_hook_so', 'hook.c',
 )
 ```
 
-### Option 2: Subproject
+### Subproject
 
-Copy this project into `subprojects/syringe/`, then:
+Include syringe in another Meson project by placing the source tree under `subprojects/syringe/`. Two approaches:
+
+#### Manual
+
+Add the repository via Git submodules:
+
+```bash
+cd your_project
+git submodule add https://github.com/kazoku/syringe.git subprojects/syringe
+```
+
+Or clone directly:
+
+```bash
+cd your_project/subprojects
+git clone https://github.com/kazoku/syringe.git
+```
+
+#### Meson Wrap
+
+Instead of copying files, let Meson fetch the repository automatically. Create `subprojects/syringe.wrap`:
+
+```ini
+[wrap-git]
+url = https://github.com/kazoku/syringe.git
+revision = main
+```
+
+Meson will detect and fetch the source on the first build.
+
+#### Reference
+
+Whichever method you choose, reference syringe in your `meson.build` the same way:
 
 ```meson
 syringe_proj = subproject('syringe')
@@ -153,13 +180,4 @@ executable('my_hook_so', 'hook.c',
   include_directories: 'subprojects/syringe/include',
   c_args: ['-D_GNU_SOURCE', '-fPIC', '-shared'],
 )
-```
-
-## CLI
-
-```bash
-syringe-cli <pid> <library.so>
-
-# example
-syringe-cli 10024 ./libhook.so
 ```

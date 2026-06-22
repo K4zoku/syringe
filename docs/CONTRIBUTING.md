@@ -14,7 +14,7 @@
 - Follow the existing style enforced by `.clang-format`.
 - Keep the header-only hooker (`syringe_hook.h`) self-contained — no external dependencies beyond libc.
 - Avoid breaking the single-TU design of `syringe_hook.h`.
-- New platform backends should follow the pattern in `include/syringe/hook/arch/`.
+- New platform backends should follow the pattern in `include/public/hook/arch/` and `src/arch`.
 
 ## Commit conventions
 

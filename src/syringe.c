@@ -27,8 +27,10 @@
 
 #include <dirent.h>
 #include <dlfcn.h>
-#include <linux/ptrace.h> /* struct ptrace_syscall_info, PTRACE_GET_SYSCALL_INFO */
+// clang-format off
 #include <sys/ptrace.h>
+#include <linux/ptrace.h> /* struct ptrace_syscall_info — must be after sys/ptrace.h on newer glibc */
+// clang-format on
 #include <sys/socket.h> /* socklen_t for PTRACE_GET_SYSCALL_INFO */
 #include <sys/time.h>   /* ualarm */
 #include <sys/types.h>
@@ -36,8 +38,8 @@
 #include <sys/user.h>
 #include <sys/wait.h>
 
+#include "syringe.h"                  /* syringe_inject, syringe_inject_with_retry, dotnet */
 #include "arch.h"                     /* per-architecture shellcode + register backend */
-#include "hook/syringe_hook_dotnet.h" /* .NET diagnostic IPC (no-ptrace injection) */
 
 /* ── internal prototype (not in public header) ────────────────────────────
  *

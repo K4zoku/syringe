@@ -5,6 +5,10 @@
  * running process by: ptrace-attach → find dlopen() → write shellcode
  * stub into text segment → redirect RIP → run → restore.
  *
+ * Auto-detection: if the target is a .NET CoreCLR process with diagnostics
+ * enabled, syringe_inject() will automatically use the .NET Diagnostic
+ * Server (AttachProfiler) to bypass ptrace and anti-debug protections.
+ *
  * Usage:
  *   #define _GNU_SOURCE
  *   #include "syringe.h"
@@ -91,6 +95,39 @@ int syringe_inject_with_retry(pid_t pid, const char *so_path, int max_retries, i
  * The CLI sets this via -v/--verbose flag. Library callers can set directly.
  */
 extern int syringe_verbose;
+
+/**
+ * Inject a shared library into a .NET CoreCLR process via AttachProfiler IPC.
+ *
+ * Bypasses ptrace entirely — uses the .NET Diagnostic Server socket to
+ * load a profiler .so (libsyringe-dotnet-profiler) into the target,
+ * which then dlopen's the requested .so.
+ *
+ * This is the only way to inject into .NET processes that have anti-debug
+ * protection (prctl PR_SET_DUMPABLE, seccomp filters).
+ *
+ * Usage:
+ *   int rc = syringe_inject_dotnet(pid, "/path/to/library.so");
+ *
+ * @param pid       Target .NET process ID
+ * @param so_path   Path to the .so to inject (relative, absolute, or resolved
+ *                  via LD_LIBRARY_PATH / common system paths)
+ * @return          0 on success, negative error code on failure:
+ *                  -1 = generic error, -2 = .NET rejected, -3 = no diagnostic socket
+ */
+int syringe_inject_dotnet(pid_t pid, const char *so_path);
+
+/**
+ * Check whether a .NET diagnostic socket exists for the given PID.
+ *
+ * Useful for auto-detecting .NET processes before attempting injection.
+ *
+ * @param pid            Target process ID to check
+ * @param out_socket     Buffer to receive the socket path (at least 128 bytes)
+ * @param socket_size    Size of the out_socket buffer
+ * @return               0 if a .NET diagnostic socket exists, -1 otherwise
+ */
+int syringe_dotnet_find_socket(pid_t pid, char *out_socket, size_t socket_size);
 
 #ifdef __cplusplus
 }

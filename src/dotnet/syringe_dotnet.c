@@ -1,29 +1,18 @@
-/*
- * syringe_hook_dotnet.h — .NET CoreCLR Diagnostic Server IPC client (header-only)
+/**
+ * syringe_dotnet.c — .NET CoreCLR Diagnostic Server IPC client (implementation)
  *
  * Implements the AttachProfiler command via the .NET diagnostic socket,
  * allowing syringe to load a .so into a running .NET process WITHOUT
  * ptrace. This bypasses anti-debug techniques (prctl PR_SET_DUMPABLE,
  * seccomp) that block ptrace-based injection.
  *
- * Protocol: .NET CoreCLR Diagnostic IPC v1
- *   - Socket: /tmp/dotnet-diagnostic-{pid}-{key}-socket (AF_UNIX)
- *   - Binary format: 20-byte header + payload, little-endian
- *   - AttachProfiler: loads a profiler .so via dlopen in the target
- *
  * Usage:
- *   int rc = syringe_dotnet_attach_profiler(pid, profiler_path, client_data);
- *   if (rc == 0) { // profiler loaded, constructor runs in target }
- *
- * This is a header-only library — just #include it from one .c file.
- * Set SYRINGE_HOOK_DEBUG=1 for diagnostic output.
+ *   #define _GNU_SOURCE
+ *   #include "syringe.h"
+ *   int rc = syringe_inject_dotnet(pid, "/path/to/library.so");
  */
-#ifndef SYRINGE_HOOK_DOTNET_H
-#define SYRINGE_HOOK_DOTNET_H
 
-#ifndef _GNU_SOURCE
-#warning "syringe_hook_dotnet: _GNU_SOURCE not defined — define it before including this header"
-#endif
+#define _GNU_SOURCE
 
 #include <dirent.h>
 #include <errno.h>
@@ -40,8 +29,10 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include "syringe.h"
+
 /* ── Return codes ──────────────────────────────────────────────────────────
- *
+
  * 0  = success — profiler .so loaded by .NET runtime
  * -1 = generic error (socket not found, connect failed, malformed response)
  * -2 = .NET runtime rejected the command (e.g., profiler already active,
@@ -56,7 +47,7 @@
 
 /* ── Debug helper (controlled by SYRINGE_HOOK_DEBUG env var) ───────────── */
 
-static inline int syringe_hook_dotnet_debug(void) {
+static int dotnet_debug_enabled(void) {
   static int checked = 0;
   static int enabled = 0;
   if (!checked) {
@@ -66,33 +57,44 @@ static inline int syringe_hook_dotnet_debug(void) {
   return enabled;
 }
 
+#define DOTNET_DBG(fmt, ...) do { \
+  if (dotnet_debug_enabled()) \
+    fprintf(stderr, "[*] [dotnet] " fmt "\n", ##__VA_ARGS__); \
+} while (0)
+
 /* ── Helpers: little-endian write/read ─────────────────────────────────── */
 
-static inline void syringe_dotnet_put_u16le(uint8_t *buf, uint16_t v) {
+static void put_u16le(uint8_t *buf, uint16_t v) {
   buf[0] = (uint8_t)(v & 0xFF);
   buf[1] = (uint8_t)((v >> 8) & 0xFF);
 }
 
-static inline void syringe_dotnet_put_u32le(uint8_t *buf, uint32_t v) {
+static void put_u32le(uint8_t *buf, uint32_t v) {
   buf[0] = (uint8_t)(v & 0xFF);
   buf[1] = (uint8_t)((v >> 8) & 0xFF);
   buf[2] = (uint8_t)((v >> 16) & 0xFF);
   buf[3] = (uint8_t)((v >> 24) & 0xFF);
 }
 
-static inline uint16_t syringe_dotnet_get_u16le(const uint8_t *buf) { return (uint16_t)(buf[0] | (buf[1] << 8)); }
+static uint16_t get_u16le(const uint8_t *buf) { return (uint16_t)(buf[0] | (buf[1] << 8)); }
 
-static inline uint32_t syringe_dotnet_get_u32le(const uint8_t *buf) {
+static uint32_t get_u32le(const uint8_t *buf) {
   return (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) | ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
 }
 
-/* ── Socket discovery ──────────────────────────────────────────────────────
+/* ── Socket discovery ─────────────────────────────────────────────────────
 
  * .NET diagnostic socket pattern: dotnet-diagnostic-{pid}-{key}-socket
  * where {key} is a numeric disambiguation key. We glob /tmp for matches
  * and return the most recently modified one. */
 
-static inline int syringe_dotnet_find_socket(pid_t pid, char *out_path, size_t path_size) {
+/* ── Internal: socket discovery ───────────────────────────────────────────
+
+ * .NET diagnostic socket pattern: dotnet-diagnostic-{pid}-{key}-socket
+ * where {key} is a numeric disambiguation key. We glob /tmp for matches
+ * and return the most recently modified one. */
+
+static int dotnet_find_socket(pid_t pid, char *out_path, size_t path_size) {
   DIR *d = opendir("/tmp");
   if (!d) {
     fprintf(stderr, "[!] [dotnet] opendir(/tmp): %s\n", strerror(errno));
@@ -148,14 +150,23 @@ static inline int syringe_dotnet_find_socket(pid_t pid, char *out_path, size_t p
   return 0;
 }
 
-/* ── Build AttachProfiler message ───────────────────────────────────────────
+/* ── Public API ──────────────────────────────────────────────────────────
+
+ * Wrapper around dotnet_find_socket that exposes the socket discovery
+ * function as part of the public API. */
+
+int syringe_dotnet_find_socket(pid_t pid, char *out_path, size_t path_size) {
+  return dotnet_find_socket(pid, out_path, path_size);
+}
+
+/* ── Build AttachProfiler message ─────────────────────────────────────────
 
  * Build the full IPC message (header + payload) for AttachProfiler.
  * Returns malloc'd buffer (caller frees) and sets *out_len.
  * Returns NULL on error. */
 
-static inline uint8_t *syringe_dotnet_build_attach_msg(const char *profiler_path, const void *client_data,
-                                                       size_t client_len, size_t *out_len) {
+static uint8_t *dotnet_build_attach_msg(const char *profiler_path, const void *client_data,
+                                        size_t client_len, size_t *out_len) {
   size_t path_chars = strlen(profiler_path) + 1;
   size_t path_bytes = path_chars * 2;
 
@@ -168,13 +179,13 @@ static inline uint8_t *syringe_dotnet_build_attach_msg(const char *profiler_path
   memset(msg, 0, total_len);
 
   memcpy(msg, "DOTNET_IPC_V1\0", 14);
-  syringe_dotnet_put_u16le(msg + 14, (uint16_t)total_len);
+  put_u16le(msg + 14, (uint16_t)total_len);
   msg[16] = 0x03;
   msg[17] = 0x01;
-  syringe_dotnet_put_u16le(msg + 18, 0x0000);
+  put_u16le(msg + 18, 0x0000);
 
   uint8_t *p = msg + 20;
-  syringe_dotnet_put_u32le(p, 5);
+  put_u32le(p, 5);
   p += 4;
 
   static const uint8_t guid[16] = {0xb5, 0x6c, 0x1c, 0x0c, 0xc9, 0x3a, 0x38, 0x43,
@@ -182,7 +193,7 @@ static inline uint8_t *syringe_dotnet_build_attach_msg(const char *profiler_path
   memcpy(p, guid, 16);
   p += 16;
 
-  syringe_dotnet_put_u32le(p, (uint32_t)path_chars);
+  put_u32le(p, (uint32_t)path_chars);
   p += 4;
   for (size_t i = 0; i < path_chars; i++) {
     p[0] = (uint8_t)profiler_path[i];
@@ -190,7 +201,7 @@ static inline uint8_t *syringe_dotnet_build_attach_msg(const char *profiler_path
     p += 2;
   }
 
-  syringe_dotnet_put_u32le(p, (uint32_t)client_len);
+  put_u32le(p, (uint32_t)client_len);
   p += 4;
   if (client_data && client_len > 0) {
     memcpy(p, client_data, client_len);
@@ -200,13 +211,13 @@ static inline uint8_t *syringe_dotnet_build_attach_msg(const char *profiler_path
   return msg;
 }
 
-/* ── Send message + receive full response ───────────────────────────────────
+/* ── Send message + receive full response ─────────────────────────────────
 
  * Send IPC message and receive full response (header + payload).
  * Returns 0 on success, -1 on error. */
 
-static inline int syringe_dotnet_send_recv(const char *socket_path, const uint8_t *msg, size_t msg_len,
-                                           uint8_t *resp_buf, size_t resp_buf_size, size_t *out_len) {
+static int dotnet_send_recv(const char *socket_path, const uint8_t *msg, size_t msg_len,
+                            uint8_t *resp_buf, size_t resp_buf_size, size_t *out_len) {
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0) {
     fprintf(stderr, "[!] [dotnet] socket(): %s\n", strerror(errno));
@@ -218,8 +229,7 @@ static inline int syringe_dotnet_send_recv(const char *socket_path, const uint8_
   addr.sun_family = AF_UNIX;
   size_t path_len = strlen(socket_path);
   if (path_len >= sizeof(addr.sun_path)) {
-    if (syringe_hook_dotnet_debug())
-      fprintf(stderr, "[*] [dotnet] socket path too long: %s\n", socket_path);
+    DOTNET_DBG("socket path too long: %s", socket_path);
     close(fd);
     return -1;
   }
@@ -257,7 +267,7 @@ static inline int syringe_dotnet_send_recv(const char *socket_path, const uint8_
     recvd += n;
   }
 
-  uint16_t total_size = syringe_dotnet_get_u16le(resp_buf + 14);
+  uint16_t total_size = get_u16le(resp_buf + 14);
   if (total_size < 20)
     total_size = 20;
   if (total_size > resp_buf_size)
@@ -279,8 +289,8 @@ static inline int syringe_dotnet_send_recv(const char *socket_path, const uint8_
 
 /* ── Public API ────────────────────────────────────────────────────────── */
 
-static inline int syringe_dotnet_attach_profiler(pid_t pid, const char *profiler_path, const void *client_data,
-                                                 size_t client_len) {
+int syringe_dotnet_attach_profiler(pid_t pid, const char *profiler_path, const void *client_data,
+                                   size_t client_len) {
   if (!profiler_path) {
     fprintf(stderr, "[!] [dotnet] profiler_path is NULL\n");
     return SYRINGE_DOTNET_ERROR;
@@ -294,23 +304,20 @@ static inline int syringe_dotnet_attach_profiler(pid_t pid, const char *profiler
             pid);
     return SYRINGE_DOTNET_NO_SOCKET;
   }
-  if (syringe_hook_dotnet_debug())
-    fprintf(stderr, "[*] [dotnet] Found diagnostic socket: %s\n", socket_path);
+  DOTNET_DBG("Found diagnostic socket: %s", socket_path);
 
   size_t msg_len = 0;
-  uint8_t *msg = syringe_dotnet_build_attach_msg(profiler_path, client_data, client_len, &msg_len);
+  uint8_t *msg = dotnet_build_attach_msg(profiler_path, client_data, client_len, &msg_len);
   if (!msg) {
     fprintf(stderr, "[!] [dotnet] Failed to build IPC message\n");
     return SYRINGE_DOTNET_ERROR;
   }
 
-  if (syringe_hook_dotnet_debug())
-    fprintf(stderr, "[*] [dotnet] Sending AttachProfiler (profiler=%s, %zu bytes client_data)\n", profiler_path,
-            client_len);
+  DOTNET_DBG("Sending AttachProfiler (profiler=%s, %zu bytes client_data)", profiler_path, client_len);
 
   uint8_t resp[512];
   size_t resp_len = 0;
-  int rc = syringe_dotnet_send_recv(socket_path, msg, msg_len, resp, sizeof(resp), &resp_len);
+  int rc = dotnet_send_recv(socket_path, msg, msg_len, resp, sizeof(resp), &resp_len);
   free(msg);
   if (rc < 0)
     return SYRINGE_DOTNET_ERROR;
@@ -322,8 +329,8 @@ static inline int syringe_dotnet_attach_profiler(pid_t pid, const char *profiler
 
   uint8_t resp_cmd = resp[17];
 
-  if (syringe_hook_dotnet_debug()) {
-    uint16_t resp_size = syringe_dotnet_get_u16le(resp + 14);
+  if (dotnet_debug_enabled()) {
+    uint16_t resp_size = get_u16le(resp + 14);
     fprintf(stderr, "[*] [dotnet] Response: size=%u cmdset=0x%02x cmdid=0x%02x resp_len=%zu\n", resp_size, resp[16],
             resp_cmd, resp_len);
     fprintf(stderr, "[*] [dotnet] Raw: ");
@@ -333,16 +340,16 @@ static inline int syringe_dotnet_attach_profiler(pid_t pid, const char *profiler
   }
 
   if (resp_cmd == 0x00) {
-    if (syringe_hook_dotnet_debug())
+    if (dotnet_debug_enabled())
       fprintf(stderr, "[*] [dotnet] AttachProfiler OK — profiler .so loaded\n");
     return SYRINGE_DOTNET_OK;
   } else if (resp_cmd == 0xFF) {
     uint32_t hresult = 0;
     if (resp_len >= 24)
-      hresult = syringe_dotnet_get_u32le(resp + 20);
+      hresult = get_u32le(resp + 20);
 
     if (hresult == 0x80040154) {
-      if (syringe_hook_dotnet_debug())
+      if (dotnet_debug_enabled())
         fprintf(stderr, "[*] [dotnet] Injected OK\n");
       return SYRINGE_DOTNET_OK;
     }
@@ -350,21 +357,21 @@ static inline int syringe_dotnet_attach_profiler(pid_t pid, const char *profiler
     fprintf(stderr, "[!] [dotnet] .NET rejected AttachProfiler (HRESULT=0x%08x)\n", hresult);
 
     if (hresult == 0x8013136A) {
-      if (syringe_hook_dotnet_debug())
+      if (dotnet_debug_enabled())
         fprintf(stderr, "[*] [dotnet]   → CORPROF_E_PROFILER_ALREADY_ACTIVE\n");
     } else if (hresult == 0x80131385) {
-      if (syringe_hook_dotnet_debug())
+      if (dotnet_debug_enabled())
         fprintf(stderr, "[*] [dotnet]   → Unknown command\n");
     } else if (hresult == 0x80070057) {
-      if (syringe_hook_dotnet_debug())
+      if (dotnet_debug_enabled())
         fprintf(stderr, "[*] [dotnet]   → Invalid argument\n");
     } else if (hresult == 0x80131515) {
-      if (syringe_hook_dotnet_debug())
+      if (dotnet_debug_enabled())
         fprintf(stderr, "[*] [dotnet]   → Not supported\n");
     }
 
     if (resp_len > 28) {
-      uint32_t msg_len = syringe_dotnet_get_u32le(resp + 24);
+      uint32_t msg_len = get_u32le(resp + 24);
       if (msg_len > 0 && 28 + msg_len * 2 <= resp_len) {
         fprintf(stderr, "[!] [dotnet]   Error message: ");
         for (uint32_t i = 0; i < msg_len && 28 + i * 2 < resp_len; i++) {
@@ -382,7 +389,7 @@ static inline int syringe_dotnet_attach_profiler(pid_t pid, const char *profiler
   }
 }
 
-static inline int syringe_inject_dotnet(pid_t pid, const char *so_path) {
+int syringe_inject_dotnet(pid_t pid, const char *so_path) {
   if (!so_path) {
     fprintf(stderr, "[!] [dotnet] so_path is NULL\n");
     return SYRINGE_DOTNET_ERROR;
@@ -483,5 +490,3 @@ static inline int syringe_inject_dotnet(pid_t pid, const char *so_path) {
   size_t client_len = strlen(abs_path) + 1;
   return syringe_dotnet_attach_profiler(pid, profiler_path, abs_path, client_len);
 }
-
-#endif /* SYRINGE_HOOK_DOTNET_H */

@@ -69,43 +69,36 @@ message('  target arch:      ' + host_arch + ' → ' + arch_src)
 
 shellcode_h = ''
 if host_arch == 'x86_64'
-  xxd_prog     = find_program('xxd',     required: true)
-  objcopy_prog = find_program('objcopy', required: true)
+    xxd_prog = find_program('xxd', required: true)
+    objcopy_prog = find_program('objcopy', required: true)
 
-  # cc.cmd_array() returns the full compiler invocation prefix, e.g.
-  #   ['cc']                — direct compiler
-  #   ['ccache', 'cc']      — ccache wrapper (common on distro build systems)
-  #   ['sccache', 'gcc']    — sccache wrapper
-  #   ['aarch64-linux-gnu-gcc']  — cross-compiler
-  # We must use the WHOLE array (joined with spaces), not just [0], otherwise
-  # invoking `ccache -c -fPIC ...` fails with "ccache: invalid option -- 'f'"
-  # because ccache expects `ccache <compiler> <args>`.
-  cc_cmd = ' '.join(cc.cmd_array())
+    # cc.cmd_array() returns the full compiler invocation prefix, e.g.
+    #   ['cc']                — direct compiler
+    #   ['ccache', 'cc']      — ccache wrapper (common on distro build systems)
+    #   ['sccache', 'gcc']    — sccache wrapper
+    #   ['aarch64-linux-gnu-gcc']  — cross-compiler
+    # We must use the WHOLE array (joined with spaces), not just [0], otherwise
+    # invoking `ccache -c -fPIC ...` fails with "ccache: invalid option -- 'f'"
+    # because ccache expects `ccache <compiler> <args>`.
+    cc_cmd = ' '.join(cc.cmd_array())
 
-  # xxd -i derives the C array name from the input filename's basename
-  # (non-alphanumeric chars → '_'). Copying sc.bin to a file named exactly
-  # 'syringe_shellcode_x86_64' makes xxd emit the exact symbol we need:
-  #   unsigned char syringe_shellcode_x86_64[] = { ... };
-  #   unsigned int  syringe_shellcode_x86_64_len = 312;
-  # We use @OUTDIR@ (meson-managed per-target dir) for intermediate files
-  # so there's no /tmp juggling and cleanup is a one-liner.
-  # Tool paths are baked into the script string at configure time.
-  sc_cmd = 'set -e; ' + \
-           '@0@ -c -fPIC -nostdlib -fno-stack-protector @INPUT@ -o "@OUTDIR@/sc.o"; ' \
-             .format(cc_cmd) + \
-           '@0@ -O binary -j .text "@OUTDIR@/sc.o" "@OUTDIR@/sc.bin"; ' \
-             .format(objcopy_prog.full_path()) + \
-           'cp "@OUTDIR@/sc.bin" "@OUTDIR@/syringe_shellcode_x86_64"; ' + \
-           '( cd "@OUTDIR@" && @0@ -i syringe_shellcode_x86_64 ) > @OUTPUT@; ' \
-             .format(xxd_prog.full_path()) + \
-           'rm -f "@OUTDIR@/sc.o" "@OUTDIR@/sc.bin" "@OUTDIR@/syringe_shellcode_x86_64"'
+    # xxd -i derives the C array name from the input filename's basename
+    # (non-alphanumeric chars → '_'). Copying sc.bin to a file named exactly
+    # 'syringe_shellcode_x86_64' makes xxd emit the exact symbol we need:
+    #   unsigned char syringe_shellcode_x86_64[] = { ... };
+    #   unsigned int  syringe_shellcode_x86_64_len = 312;
+    # We use @OUTDIR@ (meson-managed per-target dir) for intermediate files
+    # so there's no /tmp juggling and cleanup is a one-liner.
+    # Tool paths are baked into the script string at configure time.
+    sc_cmd = 'set -e; ' + '@0@ -c -fPIC -nostdlib -fno-stack-protector @INPUT@ -o "@OUTDIR@/sc.o"; '.format(cc_cmd) + '@0@ -O binary -j .text "@OUTDIR@/sc.o" "@OUTDIR@/sc.bin"; '.format(objcopy_prog.full_path()) + 'cp "@OUTDIR@/sc.bin" "@OUTDIR@/syringe_shellcode_x86_64"; ' + '( cd "@OUTDIR@" && @0@ -i syringe_shellcode_x86_64 ) > @OUTPUT@; '.format(xxd_prog.full_path()) + 'rm -f "@OUTDIR@/sc.o" "@OUTDIR@/sc.bin" "@OUTDIR@/syringe_shellcode_x86_64"'
 
-  shellcode_h = custom_target('shellcode_x86_64.h',
-    input: 'src/arch/shellcode_x86_64.S',
-    output: 'shellcode_x86_64.h',
-    command: ['sh', '-c', sc_cmd],
-    build_by_default: true,
-  )
+    shellcode_h = custom_target(
+        'shellcode_x86_64.h',
+        input: 'src/arch/shellcode_x86_64.S',
+        output: 'shellcode_x86_64.h',
+        command: ['sh', '-c', sc_cmd],
+        build_by_default: true,
+    )
 endif
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -115,8 +108,10 @@ endif
 # ── libsyringe.so — cross-process injection surface
 syringe_lib_sources = ['src/syringe.c', arch_src]
 if host_arch == 'x86_64'
-  syringe_lib_sources += shellcode_h
+    syringe_lib_sources += shellcode_h
 endif
+# .NET Diagnostic IPC client (AttachProfiler injection)
+syringe_lib_sources += ['src/dotnet/syringe_dotnet.c']
 syringe_lib = library(
     'syringe',
     syringe_lib_sources,
@@ -137,16 +132,19 @@ install_headers(
 # Public:     syringe_hook.h (user includes this)
 # Internal:   syringe_hook_common.h, syringe_hook_types.h, arch/* (included transitively)
 install_headers(
-    ['include/public/hook/syringe_hook.h',
-     'include/public/hook/syringe_hook_common.h',
-     'include/public/hook/syringe_hook_types.h',
-     'include/public/hook/syringe_hook_dotnet.h'],
+    [
+        'include/public/hook/syringe_hook.h',
+        'include/public/hook/syringe_hook_common.h',
+        'include/public/hook/syringe_hook_types.h',
+    ],
     subdir: 'syringe/hook',
 )
 install_headers(
-    ['include/public/hook/arch/syringe_hook_arch.h',
-     'include/public/hook/arch/syringe_hook_x86_64.h',
-     'include/public/hook/arch/syringe_hook_aarch64.h'],
+    [
+        'include/public/hook/arch/syringe_hook_arch.h',
+        'include/public/hook/arch/syringe_hook_x86_64.h',
+        'include/public/hook/arch/syringe_hook_aarch64.h',
+    ],
     subdir: 'syringe/hook/arch',
 )
 
@@ -178,7 +176,15 @@ syringe_cli_exe = executable(
 syringe_profiler_lib = shared_library(
     'syringe-dotnet-profiler',
     ['src/dotnet/syringe_profiler.cpp'],
-    cpp_args: ['-Wall', '-Wextra', '-O2', '-fPIC', '-fno-exceptions', '-fno-rtti', '-fno-stack-protector'],
+    cpp_args: [
+        '-Wall',
+        '-Wextra',
+        '-O2',
+        '-fPIC',
+        '-fno-exceptions',
+        '-fno-rtti',
+        '-fno-stack-protector',
+    ],
     include_directories: inc,
     link_args: ['-ldl'],
     install: true,
@@ -290,8 +296,6 @@ libsyringe_dep = declare_dependency(
     include_directories: inc,
 )
 
-
-
 # ══════════════════════════════════════════════════════════════════════════
 #  Summary
 # ══════════════════════════════════════════════════════════════════════════
@@ -308,6 +312,14 @@ message('  tests:            hook, inline, syringe')
 message(
     '  install:          syringe.h + syringe_hook.h + libsyringe.so + pkg-config',
 )
-message('  libcap:           @0@'.format(have_libcap ? 'found (CAP_SYS_PTRACE check enabled)' : 'not found (fallback to /proc/self/status)'))
-message('  set-ptrace-cap:   @0@'.format(get_option('set-ptrace-cap') ? 'enabled (setcap on install)' : 'disabled (run setcap manually if needed)'))
+message(
+    '  libcap:           @0@'.format(
+        have_libcap ? 'found (CAP_SYS_PTRACE check enabled)' : 'not found (fallback to /proc/self/status)',
+    ),
+)
+message(
+    '  set-ptrace-cap:   @0@'.format(
+        get_option('set-ptrace-cap') ? 'enabled (setcap on install)' : 'disabled (run setcap manually if needed)',
+    ),
+)
 message('=============================================\n')

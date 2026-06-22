@@ -28,7 +28,6 @@
 #include <sys/capability.h> /* cap_get_proc, CAP_SYS_PTRACE */
 #endif
 
-#include "hook/syringe_hook_dotnet.h" /* .NET auto-detect */
 #include "syringe.h"
 
 /* ── pre-flight ptrace capability check ───────────────────────────────────

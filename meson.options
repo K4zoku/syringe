@@ -1,0 +1,13 @@
+option(
+    'set-ptrace-cap',
+    type: 'boolean',
+    value: false,
+    description: 'Run setcap cap_sys_ptrace+ep on syringe-cli during install (requires root or sudo)',
+)
+
+option(
+    'libcap',
+    type: 'feature',
+    value: 'auto',
+    description: 'Link libcap for CAP_SYS_PTRACE pre-flight check in syringe-cli',
+)

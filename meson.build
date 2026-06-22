@@ -160,15 +160,36 @@ install_headers(
 )
 
 # ── syringe-cli (CLI binary — links only libsyringe)
+# Links libcap for CAP_SYS_PTRACE pre-flight check (optional but recommended).
+cap_feature = get_option('libcap')
+cap_lib = dependency('libcap', required: cap_feature)
+have_libcap = cap_lib.found()
+
 syringe_cli_exe = executable(
     'syringe-cli',
     'src/syringe-cli.c',
-    c_args: project_c_flags,
+    c_args: project_c_flags + (have_libcap ? ['-DHAVE_LIBCAP'] : []),
     include_directories: inc,
     link_args: ['-ldl', '-lpthread'],
+    dependencies: [cap_lib],
     link_with: syringe_lib,
     install: true,
 )
+
+# ── Optional: set CAP_SYS_PTRACE on syringe-cli during install ────────────
+#
+# Enable with: meson setup build -Dset-ptrace-cap=true
+# Then: sudo meson install -C build
+#
+# This runs scripts/setcap_ptrace.sh after install, which calls:
+#   setcap cap_sys_ptrace+ep <bindir>/syringe-cli
+#
+# Without this, users must run setcap manually, or run syringe-cli as root.
+# The pre-flight check in syringe-cli.c will tell users if they need this.
+if get_option('set-ptrace-cap')
+    meson.add_install_script('scripts/setcap_ptrace.sh', 'bin', 'syringe-cli')
+    message('set-ptrace-cap enabled — will run setcap during install')
+endif
 
 # ── libgleshook.so (internal — inject-ready sample, hooks EGL/GLX/SDL/Wayland)
 # syringe_hook.h is header-only, so libgleshook.c just #includes it.
@@ -286,4 +307,6 @@ message('  tests:            hook, inline, syringe')
 message(
     '  install:          syringe.h + syringe_hook.h + libsyringe.so + pkg-config',
 )
+message('  libcap:           @0@'.format(have_libcap ? 'found (CAP_SYS_PTRACE check enabled)' : 'not found (fallback to /proc/self/status)'))
+message('  set-ptrace-cap:   @0@'.format(get_option('set-ptrace-cap') ? 'enabled (setcap on install)' : 'disabled (run setcap manually if needed)'))
 message('=============================================\n')

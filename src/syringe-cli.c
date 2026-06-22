@@ -22,9 +22,134 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <sys/types.h>
+#ifdef HAVE_LIBCAP
+#include <sys/capability.h>  /* cap_get_proc, CAP_SYS_PTRACE */
+#endif
 
 #include "syringe.h"
+
+/* ── pre-flight ptrace capability check ───────────────────────────────────
+ *
+ * Fail fast if ptrace won't work at all, instead of trying 600+ regions
+ * and getting EPERM on each. Two checks:
+ *
+ * 1. CAP_SYS_PTRACE capability — if present, ptrace always works regardless
+ *    of yama scope. Root has this by default; non-root can be granted via
+ *    `setcap cap_sys_ptrace+ep syringe-cli`.
+ *
+ * 2. /proc/sys/kernel/yama/ptrace_scope:
+ *    0 = classic (any process can ptrace any same-UID process)
+ *    1 = restricted (only parent can ptrace children, OR CAP_SYS_PTRACE)
+ *    2 = admin-only (requires CAP_SYS_PTRACE)
+ *    3 = no ptrace at all
+ *
+ * If scope >= 3 and no CAP_SYS_PTRACE → fail.
+ * If scope == 2 and no CAP_SYS_PTRACE → fail.
+ * If scope == 1 and no CAP_SYS_PTRACE → warn (may fail unless we're parent).
+ * If scope == 0 → OK (or if CAP_SYS_PTRACE present).
+ *
+ * Returns 0 if OK to proceed, -1 if should abort.
+ */
+static int check_ptrace_capability(pid_t target_pid) {
+    int has_cap_sys_ptrace = 0;
+
+    /* Check 1: CAP_SYS_PTRACE capability. */
+#ifdef HAVE_LIBCAP
+    cap_t caps = cap_get_proc();
+    if (caps) {
+        cap_flag_value_t v = CAP_CLEAR;
+        if (cap_get_flag(caps, CAP_SYS_PTRACE, CAP_EFFECTIVE, &v) == 0 && v == CAP_SET) {
+            has_cap_sys_ptrace = 1;
+        }
+        cap_free(caps);
+    }
+    /* If libcap not available or cap_get_proc failed, assume no cap.
+     * The yama scope check below will catch the cases that matter. */
+#else
+    /* Without libcap, check via /proc/self/status CapEff bit (bit 19 = CAP_SYS_PTRACE).
+     * This is a fallback when libcap-dev is not installed. */
+    FILE *sf = fopen("/proc/self/status", "r");
+    if (sf) {
+        char line[256];
+        while (fgets(line, sizeof(line), sf)) {
+            unsigned long cap_eff = 0;
+            if (sscanf(line, "CapEff: %lx", &cap_eff) == 1) {
+                /* CAP_SYS_PTRACE is capability #19 (0-indexed) */
+                if (cap_eff & (1UL << 19)) {
+                    has_cap_sys_ptrace = 1;
+                }
+                break;
+            }
+        }
+        fclose(sf);
+    }
+#endif
+
+    /* Check 2: /proc/sys/kernel/yama/ptrace_scope */
+    int yama_scope = 0;  /* default: assume classic if can't read */
+    FILE *f = fopen("/proc/sys/kernel/yama/ptrace_scope", "r");
+    if (f) {
+        if (fscanf(f, "%d", &yama_scope) != 1) yama_scope = 0;
+        fclose(f);
+    }
+
+    /* Decision matrix: */
+    if (has_cap_sys_ptrace) {
+        /* CAP_SYS_PTRACE bypasses yama restrictions entirely. */
+        fprintf(stderr, "[+] CAP_SYS_PTRACE present — ptrace will work "
+                "(yama ptrace_scope=%d ignored)\n", yama_scope);
+        return 0;
+    }
+
+    if (yama_scope >= 3) {
+        fprintf(stderr, "[!] Kernel yama ptrace_scope=%d (no ptrace at all) "
+                "and no CAP_SYS_PTRACE. Cannot inject.\n", yama_scope);
+        fprintf(stderr, "    Fix: run as root, or: "
+                "sudo setcap cap_sys_ptrace+ep %s\n", program_invocation_name);
+        return -1;
+    }
+
+    if (yama_scope == 2) {
+        fprintf(stderr, "[!] Kernel yama ptrace_scope=2 (admin-only attach) "
+                "and no CAP_SYS_PTRACE. Cannot inject.\n");
+        fprintf(stderr, "    Fix: run as root, or: "
+                "sudo setcap cap_sys_ptrace+ep %s\n", program_invocation_name);
+        return -1;
+    }
+
+    if (yama_scope == 1) {
+        /* Restricted: only parent of target can ptrace, OR CAP_SYS_PTRACE.
+         * Check if we're the parent (PPID of target == our PID). */
+        char status_path[64];
+        snprintf(status_path, sizeof(status_path), "/proc/%d/status", target_pid);
+        FILE *sf = fopen(status_path, "r");
+        if (sf) {
+            char line[256];
+            pid_t target_ppid = 0;
+            while (fgets(line, sizeof(line), sf)) {
+                if (sscanf(line, "PPid: %d", &target_ppid) == 1) break;
+            }
+            fclose(sf);
+            if (target_ppid == getpid()) {
+                fprintf(stderr, "[+] yama ptrace_scope=1 — we are parent of "
+                        "target (ppid=%d), ptrace allowed\n", target_ppid);
+                return 0;
+            }
+        }
+        fprintf(stderr, "[!] Kernel yama ptrace_scope=1 (restricted) and no "
+                "CAP_SYS_PTRACE. May fail unless we're parent of target.\n");
+        fprintf(stderr, "    If injection fails with EPERM, run as root or: "
+                "sudo setcap cap_sys_ptrace+ep %s\n", program_invocation_name);
+        /* Don't abort — let it try, may succeed if kernel allows. */
+        return 0;
+    }
+
+    /* yama_scope == 0: classic ptrace permissions. */
+    fprintf(stderr, "[+] yama ptrace_scope=0 (classic) — ptrace allowed\n");
+    return 0;
+}
 
 /* ── entry point ────────────────────────────────────────────────────────── */
 
@@ -51,6 +176,8 @@ static void print_usage(const char *prog) {
         "  - Run as root, or with the same UID as the target process\n"
         "  - Requires ptrace_scope <= 1 "
           "(check /proc/sys/kernel/yama/ptrace_scope)\n"
+        "  - For non-root + ptrace_scope >= 1: build with -Dset-ptrace-cap=true\n"
+        "    and install with: sudo meson install -C build\n"
         "  - The target must link against libc/libdl (virtually all do)\n"
         "  - The injected .so's __attribute__((constructor)) runs on load\n"
         "  - To hook symbols in the target, the .so's constructor should\n"
@@ -130,6 +257,12 @@ int main(int argc, char *argv[]) {
     snprintf(proc_path, sizeof(proc_path), "/proc/%d", pid);
     if (access(proc_path, F_OK) != 0) {
         fprintf(stderr, "[!] Process %d not found (or no permission)\n", pid);
+        return 1;
+    }
+
+    /* Pre-flight: check ptrace capability + yama scope. Fail fast if
+     * ptrace won't work at all (saves scanning 600+ regions for EPERM). */
+    if (check_ptrace_capability(pid) < 0) {
         return 1;
     }
 

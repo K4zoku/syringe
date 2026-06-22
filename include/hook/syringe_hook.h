@@ -147,7 +147,7 @@
 #define SYRINGE_HOOK_H
 
 #ifndef _GNU_SOURCE
-#define _GNU_SOURCE
+#warning "syringe_hook: _GNU_SOURCE not defined — define it before including this header"
 #endif
 
 #include <stddef.h>

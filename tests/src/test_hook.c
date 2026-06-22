@@ -1,26 +1,26 @@
 /*
- * test_hook.c — unit tests cho syringe_hook module
+ * test_hook.c — unit tests for syringe_hook module
  *
  * Tests:
  *   - syringe_hook_page_floor()
  *   - syringe_hook_registry_size()
- *   - syringe_hook_count() — khởi đầu phải là 0
- *   - syringe_hook_remove() trên registry rỗng → return 0
- *   - syringe_hook_remove_all() trên registry rỗng → ko segfault
- *   - syringe_hook_is_installed() — false khi chưa hook
- *   - syringe_hook_install() trên symbol ko tồn tại → return 0
- *   - syringe_hook_install() + syringe_hook_remove() — đếm quay về 0
- *   - syringe_hook_install() trùng symbol → return 0
- *   - syringe_hook_build_jmp() — cấu trúc jmp đúng 14 bytes
- *   - syringe_hook_tramp_install() ko tồn tại symbol → MAP_FAILED
+ *   - syringe_hook_count() — must be 0 initially
+ *   - syringe_hook_remove() on empty registry → return 0
+ *   - syringe_hook_remove_all() on empty registry → no segfault
+ *   - syringe_hook_is_installed() — false when not hooked
+ *   - syringe_hook_install() on non-existent symbol → return 0
+ *   - syringe_hook_install() + syringe_hook_remove() — count back to 0
+ *   - syringe_hook_install() duplicate symbol → return 0
+ *   - syringe_hook_build_jmp() — jmp struct is correct 14 bytes
+ *   - syringe_hook_tramp_install() non-existent symbol → MAP_FAILED
  *
  * v0.5 additions:
  *   - syringe_hook_disasm_x86_64() — instruction length + reloc offset
- *     trên các prologue phổ biến (endbr64, push rbp, mov rbp,rsp, sub rsp,
+ *     on common prologues (endbr64, push rbp, mov rbp,rsp, sub rsp,
  *     lea r,[rip+disp], call rel32, NOP multi-byte)
- *   - syringe_hook_read_dst() — detect đã hook chưa
- *   - syringe_hook_install_addr() — inline hook từ địa chỉ trực tiếp
- *   - syringe_hook_tramp_make() — fix-up RIP-relative disp khi copy prologue
+ *   - syringe_hook_read_dst() — detect if already hooked
+ *   - syringe_hook_install_addr() — inline hook from direct address
+ *   - syringe_hook_tramp_make() — fix-up RIP-relative disp when copying prologue
  */
 
 #define _GNU_SOURCE
@@ -57,9 +57,9 @@ static void check_ptr(void *ptr, int expect_null, const char *expr) {
     if (is_null == expect_null) {
         tests_pass++;
         if (expect_null)
-            printf("  PASS: %s is NULL\n", expr);
+            fprintf(stderr, "  PASS: %s is NULL\n", expr);
         else
-            printf("  PASS: %s is non-NULL\n", expr);
+            fprintf(stderr, "  PASS: %s is non-NULL\n", expr);
     } else {
         tests_fail++;
         fprintf(stderr, "FAIL: %s:%d: expected %s, got %s\n",

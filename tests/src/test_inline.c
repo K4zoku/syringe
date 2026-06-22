@@ -1,5 +1,5 @@
 /*
- * test_inline.c — end-to-end test cho v0.5 inline hook path
+ * test_inline.c — end-to-end test for v0.5 inline hook path
  *
  * Scenario:
  *   1. Build a real C function `target_add(a, b)` with -fcf-protection=full

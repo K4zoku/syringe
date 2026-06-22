@@ -305,15 +305,7 @@ libsyringe_dep = declare_dependency(
     include_directories: inc,
 )
 
-# Suppress unused variable warnings — these are intentionally kept for
-# Meson's internal build target tracking
-_ = [
-    syringe_cli_exe,
-    gleshook_lib,
-    test_sample_lib,
-    libsyringe_dep,
-    test_inline_exe,
-]
+
 
 # ══════════════════════════════════════════════════════════════════════════
 #  Summary

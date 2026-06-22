@@ -424,7 +424,7 @@ qemu-aarch64 -L /usr/aarch64-linux-gnu ./build-aarch64/test_inline
 │   (links libsyringe only)│                                 │  │  syringe_hook_     │  │
 │                          │                                 │  │   install()        │  │
 │                          │                                 │  │   ↓                │  │
-│                          │                                 │  │  Patch GOT của     │  │
+│                          │                                 │  │  Patch GOT of      │  │
 │                          │                                 │  │  target process    │  │
 │                          │                                 │  └────────────────────┘  │
 │                          │                                 │   ↑                      │

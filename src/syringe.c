@@ -356,29 +356,6 @@ static int thread_in_syscall(pid_t tid) {
  *
  * Uses PTRACE_SYSCALL + PTRACE_GET_SYSCALL_INFO (Linux 5.3+):
  *   1. PTRACE_SYSCALL — continue thread until next syscall entry/exit
- *   2. waitpid — block until syscall boundary hit (no polling!)
- *   3. PTRACE_GET_SYSCALL_INFO — check if at entry or exit
- *   4. If at entry, PTRACE_SYSCALL again to continue to exit
- *
- * This is the correct way to wait for syscall exit on a ptrace-attached
- * thread. Reading /proc/<tid>/syscall after attach is unreliable because
- * the thread is already stopped.
- *
- * Returns 0 on success (thread stopped at syscall-exit, ready for SETREGS),
- * -1 on failure (error, or thread died).
- *
- * Note: this uses blocking waitpid() — no timeout. The kernel wakes us
- * as soon as the syscall boundary is hit, which is typically within a
- * few ms for event-loop apps. If the thread is stuck in a truly blocking
- * syscall (e.g., read with no data), this could block indefinitely.
- * The caller should handle this case via retry loop if needed.
- */
-/*
- * Wait for a thread to exit its current syscall, then return it stopped
- * at syscall-exit (ready for RIP modification).
- *
- * Uses PTRACE_SYSCALL + PTRACE_GET_SYSCALL_INFO (Linux 5.3+):
- *   1. PTRACE_SYSCALL — continue thread until next syscall entry/exit
  *   2. waitpid with timeout (via SIGALRM) — block until syscall boundary
  *   3. PTRACE_GET_SYSCALL_INFO — check if at entry or exit
  *   4. If at entry, PTRACE_SYSCALL again to continue to exit
@@ -656,16 +633,13 @@ static int syringe_inject_at(pid_t pid, const char *abs_path,
          * Return special error code -2 to tell the retry loop to ABORT
          * (no point trying 666 regions if ptrace is blocked). */
         if (errno == EPERM) {
-            INJ_ERR("PTRACE_SEIZE: %s — target likely has anti-debug protection "
-                    "(seccomp, prctl PR_SET_DUMPABLE, or runtime anti-debug). "
-                    "Aborting — retry will not help.", strerror(errno));
+            INJ_ERR("PTRACE_SEIZE: %s — ptrace blocked by target (seccomp/PR_SET_DUMPABLE)", strerror(errno));
             return -2;  /* special: abort retry loop */
         }
         INJ_LOG("PTRACE_SEIZE failed: %s — falling back to ATTACH", strerror(errno));
         if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) < 0) {
             if (errno == EPERM) {
-                INJ_ERR("ptrace ATTACH: %s — target has anti-debug protection. "
-                        "Aborting.", strerror(errno));
+                INJ_ERR("ptrace ATTACH: %s — ptrace blocked by target", strerror(errno));
                 return -2;  /* special: abort retry loop */
             }
             INJ_ERR("ptrace ATTACH: %s", strerror(errno));
@@ -767,9 +741,7 @@ static int syringe_inject_at(pid_t pid, const char *abs_path,
          * Return -2 to abort the retry loop: target has likely set
          * PR_SET_DUMPABLE=0, so further attempts will EPERM anyway. */
         if (errno == ESRCH) {
-            INJ_ERR("ptrace GETREGS (tid %d): thread died — target runtime likely "
-                    "killed it after detecting ptrace (anti-debug). Aborting.",
-                    inj_tid);
+            INJ_ERR("ptrace GETREGS (tid %d): thread died (anti-debug)", inj_tid);
             ptrace(PTRACE_DETACH, pid, NULL, NULL);
             free(all_tids);
             return -2;  /* abort retry loop */
@@ -843,7 +815,7 @@ static int syringe_inject_at(pid_t pid, const char *abs_path,
                 "region 0x%lx (%s) failed\n",
                 inj_tid, WSTOPSIG(status), inject_addr,
                 region_name ? region_name : "?");
-        INJ_ERR_PRINT("Restoring state and detaching (library may still have loaded)\n");
+        INJ_ERR_PRINT("Restoring state and detaching\n");
         rc = -1;
     } else if (WIFSIGNALED(status)) {
         INJ_ERR_PRINT("Thread %d killed by signal %d\n", inj_tid, WTERMSIG(status));

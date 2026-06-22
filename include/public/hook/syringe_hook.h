@@ -58,7 +58,7 @@
  *    int  syringe_hook_count()             Current hook count.
  *    int  syringe_hook_is_installed(sym)   Check if symbol is hooked.
  *    int  syringe_hook_registry_size()     Max registry capacity (SYRINGE_HOOK_MAX).
- *    void* syringe_hook_read_dst(src)      Read dst of installed JMP at src.
+ *    void* syringe_hook_jmp_target(src)     Check if addr has a syringe JMP; returns target.
  *
  *  Trampoline internals (also public, used by install_addr):
  *    int  syringe_hook_tramp_install(&t, target, hook, &orig)
@@ -87,7 +87,7 @@
  *      leak on .so unload. Only use for .so's that stay loaded for the
  *      lifetime of the target process.
  *
- *  SYRINGE_HOOK_NO_LOG
+ *  SYRINGE_HOOK_QUIET
  *      Disable all SYRINGE_HOOK_LOG() output (default: logs to stderr).
  *
  * ─────────────────────────────────────────────────────────────────────────
@@ -102,7 +102,7 @@
  *     #define _GNU_SOURCE
  *     #define SYRINGE_HOOK_MAX 64          // optional: more than 32 hooks
  *     // #define SYRINGE_HOOK_NO_HELPERS   // optional: debloat
- *     // #define SYRINGE_HOOK_NO_LOG       // optional: silent
+ *     // #define SYRINGE_HOOK_QUIET       // optional: compile-time strip logs
  *     #include <syringe/hook/syringe_hook.h>
  *
  *     static int (*orig_open)(const char *, int, ...);
@@ -173,11 +173,36 @@ extern "C" {
 #define SYRINGE_HOOK_MAX 32
 #endif
 
-#ifdef SYRINGE_HOOK_NO_LOG
+#ifdef SYRINGE_HOOK_QUIET
 #define SYRINGE_HOOK_LOG(fmt, ...) ((void)0)
 #else
+#include <stdarg.h>
+
+static void syringe_hook_log_real(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fflush(stderr);
+}
+
+static void syringe_hook_log_nop(const char *fmt, ...) { (void)fmt; }
+
+static void (*syringe_hook_log_fn)(const char *fmt, ...) = syringe_hook_log_nop;
+static int syringe_hook_log_ready = 0;
+
+static inline void syringe_hook_log_init(void) {
+    syringe_hook_log_ready = 1;
+    const char *e = getenv("SYRINGE_HOOK_DEBUG");
+    if (e && e[0] != '\0')
+        syringe_hook_log_fn = syringe_hook_log_real;
+}
+
 #define SYRINGE_HOOK_LOG(fmt, ...) \
-    fprintf(stderr, "[syringe_hook] " fmt "\n", ##__VA_ARGS__), fflush(stderr)
+    do { \
+        if (!syringe_hook_log_ready) syringe_hook_log_init(); \
+        syringe_hook_log_fn("[syringe_hook] " fmt "\n", ##__VA_ARGS__); \
+    } while (0)
 #endif
 
 /* ══════════════════════════════════════════════════════════════════════════

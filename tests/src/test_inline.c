@@ -20,7 +20,7 @@
  *     in the prologue (compiler may emit them at -O2)
  *   - syringe_hook_tramp_install atomic patch
  *   - syringe_hook_install_addr public API
- *   - syringe_hook_read_dst helper
+ *   - syringe_hook_jmp_target helper
  *   - syringe_hook_remove restore
  *
  * Build:
@@ -122,7 +122,7 @@ static void test_basic_hook(void) {
     ASSERT_EQ(7, via_orig, "orig_add(3,4) via trampoline returns 3+4");
 
     /* 5. read_dst should detect the hook we just installed */
-    void *dst = syringe_hook_read_dst((void*)target_add);
+    void *dst = syringe_hook_jmp_target((void*)target_add);
     ASSERT(dst == (void*)hook_mul, "read_dst returns hook_mul address");
 
     /* 6. Verify it works with different arguments */
@@ -138,7 +138,7 @@ static void test_basic_hook(void) {
     ASSERT_EQ(7, after_remove, "target_add(3,4) after remove returns 3+4");
 
     /* 9. read_dst should now return NULL */
-    dst = syringe_hook_read_dst((void*)target_add);
+    dst = syringe_hook_jmp_target((void*)target_add);
     ASSERT(dst == NULL, "read_dst returns NULL after remove");
 }
 

@@ -29,7 +29,7 @@
 #endif
 
 #include "syringe.h"
-#include "dotnet/dotnet_diagnostic.h"  /* .NET auto-detect */
+#include "hook/syringe_hook_dotnet.h"  /* .NET auto-detect */
 
 /* ── pre-flight ptrace capability check ───────────────────────────────────
  *

@@ -124,7 +124,7 @@ endif
 #
 # The GOT/PLT hooker (syringe_hook.h) is HEADER-ONLY — no separate .so
 # to link. Consumers just #include "syringe_hook.h" from one .c file.
-syringe_lib_sources = ['src/syringe.c', arch_src, 'src/dotnet/dotnet_diagnostic.c']
+syringe_lib_sources = ['src/syringe.c', arch_src]
 if host_arch == 'x86_64'
   syringe_lib_sources += shellcode_h
 endif
@@ -146,11 +146,12 @@ install_headers(
 
 # Install hooker headers under subdir 'syringe/hook/'
 # Public:     syringe_hook.h (user includes this)
-# Internal:   syringe_hook_common.h, arch/* (included transitively)
+# Internal:   syringe_hook_common.h, syringe_hook_types.h, arch/* (included transitively)
 install_headers(
     ['include/public/hook/syringe_hook.h',
      'include/public/hook/syringe_hook_common.h',
-     'include/public/hook/syringe_hook_types.h'],
+     'include/public/hook/syringe_hook_types.h',
+     'include/public/hook/syringe_hook_dotnet.h'],
     subdir: 'syringe/hook',
 )
 install_headers(
@@ -158,12 +159,6 @@ install_headers(
      'include/public/hook/arch/syringe_hook_x86_64.h',
      'include/public/hook/arch/syringe_hook_aarch64.h'],
     subdir: 'syringe/hook/arch',
-)
-
-# Install .NET diagnostic header
-install_headers(
-    ['include/dotnet/dotnet_diagnostic.h'],
-    subdir: 'syringe/dotnet',
 )
 
 # ── syringe-cli (CLI binary — links only libsyringe)

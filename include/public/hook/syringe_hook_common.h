@@ -529,7 +529,6 @@ static inline int syringe_hook_install(const char *sym, void *hook, void **orig_
     return ctx.count + (rec->has_tramp ? 1 : 0);
 }
 
-#ifndef SYRINGE_HOOK_NO_HELPERS
 static inline int syringe_hook_install_addr(const char *sym, void *target,
                                               void *hook, void **orig_out) {
     if (syringe_nhooks >= SYRINGE_HOOK_MAX) {
@@ -570,29 +569,12 @@ static inline int syringe_hook_install_addr(const char *sym, void *target,
     syringe_nhooks++;
     return 1;
 }
-#endif /* !SYRINGE_HOOK_NO_HELPERS */
 
 #ifndef SYRINGE_HOOK_NO_HELPERS
-static inline void *syringe_hook_read_dst(void *src) {
-    if (!src) return NULL;
-    uint8_t *p = (uint8_t*)src;
-    /* FF 25 00 00 00 00 + 8-byte abs addr (x86-64 JMP-abs encoding) */
-    if (p[0] != 0xFF || p[1] != 0x25) return NULL;
-    if (p[2] != 0x00 || p[3] != 0x00 ||
-        p[4] != 0x00 || p[5] != 0x00) return NULL;
-    void *dst;
-    if (syringe_memfd >= 0) {
-        ssize_t rd = pread(syringe_memfd, &dst, 8,
-                           (off_t)(uintptr_t)(p + 6));
-        if (rd != 8) return NULL;
-    } else {
-        memcpy(&dst, p + 6, 8);
-    }
-    return dst;
+static inline void *syringe_hook_jmp_target(void *src) {
+    return syringe_hook_arch_read_jmp_target(src);
 }
-#endif /* !SYRINGE_HOOK_NO_HELPERS */
 
-#ifndef SYRINGE_HOOK_NO_HELPERS
 static inline int syringe_hook_remove(const char *sym) {
     for (int i = 0; i < syringe_nhooks; i++) {
         SyringeHookRecord *rec = &syringe_hooks[i];

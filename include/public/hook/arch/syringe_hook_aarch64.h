@@ -122,6 +122,15 @@ static inline int syringe_hook_aarch64_is_bti(uint32_t insn) {
  * 64-bit address. Used instead of B rel26 (which is limited to ±128 MB)
  * because we can't guarantee hook and target are within range.
  */
+static inline void *syringe_hook_arch_read_jmp_target(void *src) {
+    if (!src) return NULL;
+    uint32_t *p = (uint32_t*)src;
+    if (p[0] != 0x58000050 || p[1] != 0xD61F0200) return NULL;
+    void *dst;
+    memcpy(&dst, (uint8_t*)src + 8, sizeof(dst));
+    return dst;
+}
+
 static inline void syringe_hook_arch_build_jmp(uint8_t *buf, void *dest) {
     /* LDR x16, [pc, #8] — load from PC+8 = address of the .quad below */
     const uint32_t ldr_x16 = 0x58000050;

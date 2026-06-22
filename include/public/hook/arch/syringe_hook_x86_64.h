@@ -53,6 +53,17 @@ static inline void syringe_hook_build_jmp(uint8_t *buf, void *dest) {
     syringe_hook_arch_build_jmp(buf, dest);
 }
 
+static inline void *syringe_hook_arch_read_jmp_target(void *src) {
+    if (!src) return NULL;
+    uint8_t *p = (uint8_t*)src;
+    if (p[0] != 0xFF || p[1] != 0x25) return NULL;
+    if (p[2] != 0x00 || p[3] != 0x00 ||
+        p[4] != 0x00 || p[5] != 0x00) return NULL;
+    void *dst;
+    memcpy(&dst, p + 6, sizeof(dst));
+    return dst;
+}
+
 /* ── x86-64 length-disassembler ─────────────────────────────────────────────── */
 
 static inline size_t syringe_hook_arch_disasm(const uint8_t *code,

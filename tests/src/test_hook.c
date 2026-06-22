@@ -18,7 +18,7 @@
  *   - syringe_hook_disasm_x86_64() — instruction length + reloc offset
  *     on common prologues (endbr64, push rbp, mov rbp,rsp, sub rsp,
  *     lea r,[rip+disp], call rel32, NOP multi-byte)
- *   - syringe_hook_read_dst() — detect if already hooked
+ *   - syringe_hook_jmp_target() — detect if already hooked
  *   - syringe_hook_install_addr() — inline hook from direct address
  *   - syringe_hook_tramp_make() — fix-up RIP-relative disp when copying prologue
  */
@@ -512,7 +512,7 @@ static void test_disasm_x86_64(void) {
 #endif
 }
 
-/* ── tests: syringe_hook_read_dst ───────────────────────────────────────── */
+/* ── tests: syringe_hook_jmp_target ───────────────────────────────────────── */
 
 static void test_read_dst(void) {
     printf("\n[read_dst]\n");
@@ -520,20 +520,20 @@ static void test_read_dst(void) {
 
     /* Not hooked → NULL */
     uint8_t plain[] = { 0x55, 0x48, 0x89, 0xE5 };
-    void *dst = syringe_hook_read_dst(plain);
+    void *dst = syringe_hook_jmp_target(plain);
     check_ptr(dst, 1, "plain prologue → NULL");
 
     /* Hooked (FF 25 + zeros + 8-byte addr) → returns the addr */
     uint8_t hooked[14];
     syringe_hook_build_jmp(hooked, (void*)0xDEADBEEFCAFEULL);
-    dst = syringe_hook_read_dst(hooked);
+    dst = syringe_hook_jmp_target(hooked);
     check_ptr(dst, 0, "hooked prologue → non-NULL");
     #ifdef __LP64__
         check_ptr_eq((void*)0xDEADBEEFCAFEULL, dst, "read_dst returns correct addr");
     #endif
 
     /* NULL input */
-    dst = syringe_hook_read_dst(NULL);
+    dst = syringe_hook_jmp_target(NULL);
     check_ptr(dst, 1, "NULL input → NULL");
 #else
     printf("  SKIP: SYRINGE_HOOK_NO_HELPERS defined\n");

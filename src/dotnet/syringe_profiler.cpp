@@ -60,12 +60,16 @@ __attribute__((constructor)) static void syringe_profiler_init() {
  * the overlay was already loaded by our constructor.
  */
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+
 class SyringeProfiler : public ICorProfilerCallback3 {
 private:
     LONG refCount;
 
 public:
     SyringeProfiler() : refCount(1) {}
+    virtual ~SyringeProfiler() {}
 
     /* ── IUnknown ── */
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
@@ -209,6 +213,8 @@ public:
     #undef STUB
 };
 
+#pragma GCC diagnostic pop
+
 /* ── SyringeClassFactory — implements IClassFactory ─────────────────────── */
 
 class SyringeClassFactory : public IClassFactory {
@@ -217,6 +223,7 @@ private:
 
 public:
     SyringeClassFactory() : refCount(1) {}
+    virtual ~SyringeClassFactory() {}
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
         if (!ppv) return E_NOTIMPL;

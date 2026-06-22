@@ -174,7 +174,6 @@ static int check_ptrace_capability(pid_t target_pid) {
 static void print_usage(const char *prog) {
   fprintf(stderr,
           "syringe-cli — inject a shared library into a running process\n\n"
-          "  SYRINGE Yields Runtime Injected Native Global Executables\n\n"
           "Usage:\n"
           "  %s [OPTIONS] <pid> <library.so>\n\n"
           "Options:\n"

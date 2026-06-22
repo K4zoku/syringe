@@ -1,7 +1,5 @@
 # syringe
 
-**S**YRINGE **Y**ields **R**untime **I**njected **N**ative **G**lobal **E**xecutables
-
 A two-part toolkit for x86-64 Linux:
 
 - **`libsyringe.so`** — ptrace-based shared-library injector (cross-process). Build with meson, link with `-lsyringe`.

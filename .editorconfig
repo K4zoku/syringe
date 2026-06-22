@@ -16,5 +16,5 @@ trim_trailing_whitespace = false
 [*.{yml,yaml}]
 indent_size = 2
 
-[*.{c,h}]
+[*.{c,h,cc,cpp}]
 indent_size = 2
